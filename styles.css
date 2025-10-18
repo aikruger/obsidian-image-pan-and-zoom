@@ -1,8 +1,11 @@
-/*
+.image-zoom-drag-parent-active {
+  overflow: hidden;
+  line-height: 0;
+}
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
-
-If your plugin does not need CSS, delete this file.
-
-*/
+.image-zoom-drag-active {
+  will-change: transform;
+  transition: transform 0.1s ease-out;
+  position: relative;
+  z-index: 100;
+}
