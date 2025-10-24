@@ -9,6 +9,9 @@ export default class ImageZoomDragPlugin extends Plugin {
     private offsetY = 0;
     private scale = 1;
     private resetButton: HTMLButtonElement | null = null;
+    private isMouseInFrame = false;
+    private panSpeed = 1.0; // Default pan speed multiplier
+    private panSpeedSlider: HTMLInputElement | null = null;
 
     async onload() {
         this.registerDomEvent(document, 'click', this.handleImageClick.bind(this));
@@ -22,6 +25,12 @@ export default class ImageZoomDragPlugin extends Plugin {
             if (e.key === 'Escape' && this.activeImage) {
                 this.resetImage(this.activeImage);
                 this.activeImage = null;
+            }
+        });
+
+        this.registerDomEvent(document, 'mousemove', (e) => {
+            if (this.activeImage) {
+                this.isMouseInFrame = this.isMouseWithinFrame(e);
             }
         });
     }
@@ -62,6 +71,9 @@ export default class ImageZoomDragPlugin extends Plugin {
     handleWheel(e: WheelEvent) {
         if (!this.activeImage) return;
 
+        // Only zoom if mouse is within the frame
+        if (!this.isMouseWithinFrame(e)) return;
+
         e.preventDefault();
 
         const zoomSpeed = 0.1;
@@ -93,12 +105,19 @@ export default class ImageZoomDragPlugin extends Plugin {
         if (e.button !== 0) return;
 
         if (this.activeImage && this.activeImage.contains(e.target as Node)) {
-            // Don't start dragging if clicking on reset button
-            if ((e.target as HTMLElement).closest('.image-zoom-reset-btn')) return;
+            // Don't start dragging if clicking on reset button or slider
+            if ((e.target as HTMLElement).closest('.image-zoom-reset-btn') ||
+                (e.target as HTMLElement).closest('.image-zoom-pan-speed-control')) {
+                return;
+            }
+
+            // Only allow dragging if mouse is within frame
+            if (!this.isMouseWithinFrame(e)) return;
 
             this.isDragging = true;
-            this.initialX = e.clientX - this.offsetX;
-            this.initialY = e.clientY - this.offsetY;
+            // Account for pan speed in initial position calculation
+            this.initialX = e.clientX - (this.offsetX / this.panSpeed);
+            this.initialY = e.clientY - (this.offsetY / this.panSpeed);
             this.activeImage.classList.add('is-dragging');
             e.preventDefault();
         }
@@ -107,8 +126,12 @@ export default class ImageZoomDragPlugin extends Plugin {
     handleMouseMove(e: MouseEvent) {
         if (!this.isDragging || !this.activeImage) return;
 
-        this.offsetX = e.clientX - this.initialX;
-        this.offsetY = e.clientY - this.initialY;
+        // Apply pan speed multiplier
+        const deltaX = (e.clientX - this.initialX) * this.panSpeed;
+        const deltaY = (e.clientY - this.initialY) * this.panSpeed;
+
+        this.offsetX = deltaX;
+        this.offsetY = deltaY;
         this.updateTransform();
     }
 
@@ -172,7 +195,7 @@ export default class ImageZoomDragPlugin extends Plugin {
     showResetButton() {
         if (!this.activeImage) return;
 
-        // Remove existing button if present
+        // Remove existing controls if present
         this.hideResetButton();
 
         // Create controls container
@@ -182,6 +205,11 @@ export default class ImageZoomDragPlugin extends Plugin {
         // Create and add reset button
         this.resetButton = this.createResetButton();
         controlsContainer.appendChild(this.resetButton);
+
+        // Create and add pan speed slider
+        const panSpeedSliderContainer = this.createPanSpeedSlider();
+        this.panSpeedSlider = panSpeedSliderContainer.querySelector('input[type="range"]');
+        controlsContainer.appendChild(panSpeedSliderContainer);
 
         // Add to parent container
         const parent = this.activeImage.parentElement;
@@ -198,6 +226,58 @@ export default class ImageZoomDragPlugin extends Plugin {
                 controlsContainer.remove();
             }
             this.resetButton = null;
+            this.panSpeedSlider = null;
         }
+    }
+
+    isMouseWithinFrame(e: MouseEvent): boolean {
+        if (!this.activeImage) return false;
+
+        const rect = this.activeImage.getBoundingClientRect();
+        // Add 8px padding to account for frame offset
+        const framePadding = 8;
+
+        return (
+            e.clientX >= rect.left - framePadding &&
+            e.clientX <= rect.right + framePadding &&
+            e.clientY >= rect.top - framePadding &&
+            e.clientY <= rect.bottom + framePadding
+        );
+    }
+
+    createPanSpeedSlider(): HTMLDivElement {
+        const container = document.createElement('div');
+        container.className = 'image-zoom-pan-speed-control';
+
+        const label = document.createElement('label');
+        label.className = 'image-zoom-pan-speed-label';
+        label.textContent = 'Pan Speed';
+        label.setAttribute('for', 'pan-speed-slider');
+
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.id = 'pan-speed-slider';
+        slider.className = 'image-zoom-pan-speed-slider';
+        slider.min = '0.25';
+        slider.max = '3';
+        slider.step = '0.25';
+        slider.value = this.panSpeed.toString();
+        slider.setAttribute('aria-label', 'Adjust panning speed');
+
+        const valueDisplay = document.createElement('span');
+        valueDisplay.className = 'image-zoom-pan-speed-value';
+        valueDisplay.textContent = `${this.panSpeed.toFixed(2)}x`;
+
+        slider.addEventListener('input', (e) => {
+            e.stopPropagation();
+            this.panSpeed = parseFloat(slider.value);
+            valueDisplay.textContent = `${this.panSpeed.toFixed(2)}x`;
+        });
+
+        container.appendChild(label);
+        container.appendChild(slider);
+        container.appendChild(valueDisplay);
+
+        return container;
     }
 }
