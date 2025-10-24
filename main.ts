@@ -1,7 +1,7 @@
 import { Plugin } from 'obsidian';
 
 export default class ImageZoomDragPlugin extends Plugin {
-    private activeImage: HTMLElement | null = null;
+    private activeImage: HTMLImageElement | SVGSVGElement | null = null;
     private isDragging = false;
     private initialX = 0;
     private initialY = 0;
@@ -34,9 +34,11 @@ export default class ImageZoomDragPlugin extends Plugin {
                 this.resetImage(this.activeImage);
             }
             this.activeImage = imageOrSvg;
-            this.activeImage.classList.add('image-zoom-drag-active');
-            this.activeImage.parentElement?.classList.add('image-zoom-drag-parent-active');
-            this.activeImage.style.cursor = 'grab';
+            if (this.activeImage) {
+                this.activeImage.classList.add('image-zoom-drag-active');
+                this.activeImage.parentElement?.classList.add('image-zoom-drag-parent-active');
+                this.activeImage.style.cursor = 'grab';
+            }
         }
     }
 
@@ -92,7 +94,7 @@ export default class ImageZoomDragPlugin extends Plugin {
         this.activeImage.style.transition = 'transform 0.1s ease-out';
     }
 
-    resetImage(image: HTMLElement) {
+    resetImage(image: HTMLImageElement | SVGSVGElement) {
         image.style.transform = '';
         image.style.cursor = 'default';
         image.style.transition = '';
