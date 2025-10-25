@@ -12,6 +12,9 @@ export default class ImageZoomDragPlugin extends Plugin {
     private isMouseInFrame = false;
     private panSpeed = 1.0; // Default pan speed multiplier
     private panSpeedSlider: HTMLInputElement | null = null;
+    private isSvg = false;
+    private originalViewBox: { x: number; y: number; width: number; height: number; } | null = null;
+    private svgViewBox: { x: number; y: number; width: number; height: number; } | null = null;
 
     async onload() {
         this.registerDomEvent(document, 'click', this.handleImageClick.bind(this));
@@ -39,6 +42,22 @@ export default class ImageZoomDragPlugin extends Plugin {
         // Event listeners are automatically removed by registerDomEvent
     }
 
+    wrapImageWithFrame(imageElement: HTMLImageElement | SVGSVGElement) {
+        let wrapper = document.createElement('div');
+        wrapper.className = 'image-zoom-frame-active';
+        imageElement.parentNode?.insertBefore(wrapper, imageElement);
+        wrapper.appendChild(imageElement);
+    }
+
+    unwrapImageFromFrame(imageElement: HTMLImageElement | SVGSVGElement) {
+        // Remove wrapper and restore image in DOM, if present
+        let wrapper = imageElement.parentNode;
+        if (wrapper && wrapper instanceof HTMLElement && wrapper.classList.contains('image-zoom-frame-active')) {
+            wrapper.parentNode?.insertBefore(imageElement, wrapper);
+            wrapper.remove();
+        }
+    }
+
     handleImageClick(e: MouseEvent) {
         const target = (e.target as HTMLElement).closest('img, svg');
 
@@ -55,17 +74,30 @@ export default class ImageZoomDragPlugin extends Plugin {
             this.activeImage = target;
 
             if (this.activeImage) {
-                this.activeImage.classList.add('image-zoom-drag-active');
-                const parent = this.activeImage.parentElement;
-                if (parent) {
-                    parent.classList.add('image-zoom-drag-parent-active');
+                this.isSvg = this.activeImage instanceof SVGSVGElement;
+                if (this.isSvg) {
+                    const viewBox = this.activeImage.getAttribute('viewBox');
+                    if (viewBox) {
+                        this.originalViewBox = this.parseViewBox(viewBox);
+                        this.svgViewBox = { ...this.originalViewBox };
+                    }
                 }
+                this.wrapImageWithFrame(this.activeImage);
+                this.activeImage.classList.add('image-zoom-drag-active');
                 this.activeImage.style.cursor = 'grab';
 
                 // Show reset button
                 this.showResetButton();
             }
         }
+    }
+
+    parseViewBox(viewBoxString: string): { x: number; y: number; width: number; height: number; } | null {
+        const parts = viewBoxString.split(' ').map(parseFloat);
+        if (parts.length !== 4) {
+            return null;
+        }
+        return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
     }
 
     handleWheel(e: WheelEvent) {
@@ -76,15 +108,16 @@ export default class ImageZoomDragPlugin extends Plugin {
 
         e.preventDefault();
 
-        const zoomSpeed = 0.1;
+        const scaleBy = 1.1;
         const prevScale = this.scale;
 
         // Calculate new scale
         if (e.deltaY < 0) {
-            this.scale += zoomSpeed;
+            this.scale *= scaleBy;
         } else {
-            this.scale = Math.max(0.1, this.scale - zoomSpeed);
+            this.scale /= scaleBy;
         }
+        this.scale = Math.max(0.1, this.scale);
 
         // Optional: Zoom toward cursor position
         // Get mouse position relative to image
@@ -96,6 +129,16 @@ export default class ImageZoomDragPlugin extends Plugin {
         const scaleChange = this.scale / prevScale;
         this.offsetX = mouseX - (mouseX - this.offsetX) * scaleChange;
         this.offsetY = mouseY - (mouseY - this.offsetY) * scaleChange;
+
+        if (this.isSvg && this.svgViewBox) {
+            const newWidth = this.originalViewBox.width / this.scale;
+            const newHeight = this.originalViewBox.height / this.scale;
+
+            this.svgViewBox.x = this.originalViewBox.x - (this.offsetX * (newWidth / this.originalViewBox.width));
+            this.svgViewBox.y = this.originalViewBox.y - (this.offsetY * (newHeight / this.originalViewBox.height));
+            this.svgViewBox.width = newWidth;
+            this.svgViewBox.height = newHeight;
+        }
 
         this.updateTransform();
     }
@@ -126,12 +169,14 @@ export default class ImageZoomDragPlugin extends Plugin {
     handleMouseMove(e: MouseEvent) {
         if (!this.isDragging || !this.activeImage) return;
 
-        // Apply pan speed multiplier
-        const deltaX = (e.clientX - this.initialX) * this.panSpeed;
-        const deltaY = (e.clientY - this.initialY) * this.panSpeed;
+        if (this.isSvg && this.svgViewBox) {
+            this.svgViewBox.x -= e.movementX * (this.svgViewBox.width / this.activeImage.getBoundingClientRect().width);
+            this.svgViewBox.y -= e.movementY * (this.svgViewBox.height / this.activeImage.getBoundingClientRect().height);
+        } else {
+            this.offsetX += e.movementX;
+            this.offsetY += e.movementY;
+        }
 
-        this.offsetX = deltaX;
-        this.offsetY = deltaY;
         this.updateTransform();
     }
 
@@ -145,26 +190,30 @@ export default class ImageZoomDragPlugin extends Plugin {
     updateTransform() {
         if (!this.activeImage) return;
 
-        // Apply translate before scale to maintain consistent panning
-        // Divide offsets by scale to compensate for zoom level
-        const adjustedX = this.offsetX / this.scale;
-        const adjustedY = this.offsetY / this.scale;
+        if (this.isSvg) {
+            this.updateSvgTransform();
+        } else {
+            this.activeImage.style.transform = `translate(${this.offsetX}px, ${this.offsetY}px) scale(${this.scale})`;
+            this.activeImage.style.transformOrigin = 'top left';
+            this.activeImage.style.transition = 'transform 0.1s ease-out';
+        }
+    }
 
-        this.activeImage.style.transform = `translate(${adjustedX}px, ${adjustedY}px) scale(${this.scale})`;
-        this.activeImage.style.transformOrigin = 'center center';
-        this.activeImage.style.transition = 'transform 0.1s ease-out';
+    updateSvgTransform() {
+        if (!this.activeImage || !this.svgViewBox) return;
+
+        (this.activeImage as SVGSVGElement).setAttribute('viewBox', `${this.svgViewBox.x} ${this.svgViewBox.y} ${this.svgViewBox.width} ${this.svgViewBox.height}`);
     }
 
     resetImage(image: HTMLImageElement | SVGSVGElement) {
+        this.unwrapImageFromFrame(image);
+        if (this.isSvg && this.originalViewBox) {
+            (image as SVGSVGElement).setAttribute('viewBox', `${this.originalViewBox.x} ${this.originalViewBox.y} ${this.originalViewBox.width} ${this.originalViewBox.height}`);
+        }
         image.style.transform = '';
         image.style.cursor = 'default';
         image.style.transition = '';
         image.classList.remove('image-zoom-drag-active');
-
-        const parent = image.parentElement;
-        if (parent) {
-            parent.classList.remove('image-zoom-drag-parent-active');
-        }
 
         // Hide reset button
         this.hideResetButton();
@@ -173,6 +222,9 @@ export default class ImageZoomDragPlugin extends Plugin {
         this.scale = 1;
         this.offsetX = 0;
         this.offsetY = 0;
+        this.isSvg = false;
+        this.originalViewBox = null;
+        this.svgViewBox = null;
     }
 
     createResetButton(): HTMLButtonElement {
