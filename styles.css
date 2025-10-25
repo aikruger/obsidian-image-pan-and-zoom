@@ -61,3 +61,12 @@
 .image-zoom-drag-active.is-dragging {
   cursor: grabbing !important;
 }
+
+/* Mermaid SVG specific styles */
+.markdown-preview-view .mermaid svg {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  display: block;
+}
