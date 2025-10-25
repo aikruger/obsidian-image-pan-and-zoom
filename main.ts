@@ -13,6 +13,7 @@ export default class ImageZoomDragPlugin extends Plugin {
     private isSvg = false;
     private originalViewBox: { x: number; y: number; width: number; height: number; } | null = null;
     private svgViewBox: { x: number; y: number; width: number; height: number; } | null = null;
+    private resizeObserver: ResizeObserver | null = null;
 
     async onload() {
         this.registerDomEvent(document, 'click', this.handleImageClick.bind(this));
@@ -38,6 +39,9 @@ export default class ImageZoomDragPlugin extends Plugin {
 
     onunload() {
         // Event listeners are automatically removed by registerDomEvent
+        if (this.resizeObserver) {
+            this.resizeObserver.disconnect();
+        }
     }
 
     handleImageClick(e: MouseEvent) {
@@ -58,13 +62,15 @@ export default class ImageZoomDragPlugin extends Plugin {
             if (this.activeImage) {
                 this.isSvg = this.activeImage instanceof SVGSVGElement;
                 if (this.isSvg) {
-                    const viewBox = this.activeImage.getAttribute('viewBox');
+                    const svg = this.activeImage as SVGSVGElement;
+                    const viewBox = svg.getAttribute('viewBox');
                     if (viewBox) {
                         this.originalViewBox = this.parseViewBox(viewBox);
                         if (this.originalViewBox) {
                             this.svgViewBox = { ...this.originalViewBox };
                         }
                     }
+                    this.setupDynamicResize(svg);
                 }
                 this.activeImage.classList.add('image-zoom-drag-active');
                 this.activeImage.style.cursor = 'grab';
@@ -81,6 +87,30 @@ export default class ImageZoomDragPlugin extends Plugin {
             return null;
         }
         return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+    }
+
+    fitSvgToContainer(svg: SVGSVGElement) {
+        const container = svg.closest('.workspace-leaf-content') || svg.parentElement;
+        if (container) {
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+            svg.setAttribute('width', `${width}`);
+            svg.setAttribute('height', `${height}`);
+            svg.style.width = `${width}px`;
+            svg.style.height = `${height}px`;
+            svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        }
+    }
+
+    setupDynamicResize(svg: SVGSVGElement) {
+        const container = svg.closest('.workspace-leaf-content') || svg.parentElement;
+        if (container) {
+            this.resizeObserver = new ResizeObserver(() => {
+                this.fitSvgToContainer(svg);
+            });
+            this.resizeObserver.observe(container);
+            this.fitSvgToContainer(svg);
+        }
     }
 
     handleWheel(e: WheelEvent) {
@@ -121,6 +151,9 @@ export default class ImageZoomDragPlugin extends Plugin {
         }
 
         this.updateTransform();
+        if (this.isSvg && this.activeImage) {
+            this.fitSvgToContainer(this.activeImage as SVGSVGElement);
+        }
     }
 
     handleMouseDown(e: MouseEvent) {
@@ -154,6 +187,9 @@ export default class ImageZoomDragPlugin extends Plugin {
         }
 
         this.updateTransform();
+        if (this.isSvg && this.activeImage) {
+            this.fitSvgToContainer(this.activeImage as SVGSVGElement);
+        }
     }
 
     handleMouseUp(e: MouseEvent) {
@@ -182,8 +218,17 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     resetImage(image: HTMLImageElement | SVGSVGElement) {
+        if (this.resizeObserver) {
+            this.resizeObserver.disconnect();
+            this.resizeObserver = null;
+        }
+
         if (this.isSvg && this.originalViewBox) {
             (image as SVGSVGElement).setAttribute('viewBox', `${this.originalViewBox.x} ${this.originalViewBox.y} ${this.originalViewBox.width} ${this.originalViewBox.height}`);
+            image.removeAttribute('width');
+            image.removeAttribute('height');
+            image.style.width = '';
+            image.style.height = '';
         }
         image.style.transform = '';
         image.style.cursor = 'default';
