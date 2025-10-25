@@ -79,7 +79,9 @@ export default class ImageZoomDragPlugin extends Plugin {
                     const viewBox = this.activeImage.getAttribute('viewBox');
                     if (viewBox) {
                         this.originalViewBox = this.parseViewBox(viewBox);
-                        this.svgViewBox = { ...this.originalViewBox };
+                        if (this.originalViewBox) {
+                            this.svgViewBox = { ...this.originalViewBox };
+                        }
                     }
                 }
                 this.wrapImageWithFrame(this.activeImage);
@@ -130,7 +132,7 @@ export default class ImageZoomDragPlugin extends Plugin {
         this.offsetX = mouseX - (mouseX - this.offsetX) * scaleChange;
         this.offsetY = mouseY - (mouseY - this.offsetY) * scaleChange;
 
-        if (this.isSvg && this.svgViewBox) {
+        if (this.isSvg && this.svgViewBox && this.originalViewBox) {
             const newWidth = this.originalViewBox.width / this.scale;
             const newHeight = this.originalViewBox.height / this.scale;
 
