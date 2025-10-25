@@ -9,6 +9,7 @@ export default class ImageZoomDragPlugin extends Plugin {
     private offsetY = 0;
     private scale = 1;
     private resetButton: HTMLButtonElement | null = null;
+    private isMouseInFrame = false;
     private isSvg = false;
     private originalViewBox: { x: number; y: number; width: number; height: number; } | null = null;
     private svgViewBox: { x: number; y: number; width: number; height: number; } | null = null;
@@ -25,6 +26,12 @@ export default class ImageZoomDragPlugin extends Plugin {
             if (e.key === 'Escape' && this.activeImage) {
                 this.resetImage(this.activeImage);
                 this.activeImage = null;
+            }
+        });
+
+        this.registerDomEvent(document, 'mousemove', (e) => {
+            if (this.activeImage) {
+                this.isMouseInFrame = this.isMouseWithinFrame(e);
             }
         });
     }
@@ -77,7 +84,7 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     handleWheel(e: WheelEvent) {
-        if (!this.activeImage) return;
+        if (!this.activeImage || !this.isMouseWithinFrame(e)) return;
 
         e.preventDefault();
 
@@ -120,7 +127,7 @@ export default class ImageZoomDragPlugin extends Plugin {
         // Only respond to left click
         if (e.button !== 0) return;
 
-        if (this.activeImage && this.activeImage.contains(e.target as Node)) {
+        if (this.activeImage && this.isMouseWithinFrame(e) && this.activeImage.contains(e.target as Node)) {
             // Don't start dragging if clicking on reset button or slider
             if ((e.target as HTMLElement).closest('.image-zoom-reset-btn')) {
                 return;
@@ -242,5 +249,18 @@ export default class ImageZoomDragPlugin extends Plugin {
             }
             this.resetButton = null;
         }
+    }
+
+    isMouseWithinFrame(e: MouseEvent): boolean {
+        if (!this.activeImage) return false;
+
+        const rect = this.activeImage.getBoundingClientRect();
+
+        return (
+            e.clientX >= rect.left &&
+            e.clientX <= rect.right &&
+            e.clientY >= rect.top &&
+            e.clientY <= rect.bottom
+        );
     }
 }
