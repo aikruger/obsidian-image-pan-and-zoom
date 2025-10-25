@@ -9,9 +9,6 @@ export default class ImageZoomDragPlugin extends Plugin {
     private offsetY = 0;
     private scale = 1;
     private resetButton: HTMLButtonElement | null = null;
-    private isMouseInFrame = false;
-    private panSpeed = 1.0; // Default pan speed multiplier
-    private panSpeedSlider: HTMLInputElement | null = null;
     private isSvg = false;
     private originalViewBox: { x: number; y: number; width: number; height: number; } | null = null;
     private svgViewBox: { x: number; y: number; width: number; height: number; } | null = null;
@@ -30,32 +27,10 @@ export default class ImageZoomDragPlugin extends Plugin {
                 this.activeImage = null;
             }
         });
-
-        this.registerDomEvent(document, 'mousemove', (e) => {
-            if (this.activeImage) {
-                this.isMouseInFrame = this.isMouseWithinFrame(e);
-            }
-        });
     }
 
     onunload() {
         // Event listeners are automatically removed by registerDomEvent
-    }
-
-    wrapImageWithFrame(imageElement: HTMLImageElement | SVGSVGElement) {
-        let wrapper = document.createElement('div');
-        wrapper.className = 'image-zoom-frame-active';
-        imageElement.parentNode?.insertBefore(wrapper, imageElement);
-        wrapper.appendChild(imageElement);
-    }
-
-    unwrapImageFromFrame(imageElement: HTMLImageElement | SVGSVGElement) {
-        // Remove wrapper and restore image in DOM, if present
-        let wrapper = imageElement.parentNode;
-        if (wrapper && wrapper instanceof HTMLElement && wrapper.classList.contains('image-zoom-frame-active')) {
-            wrapper.parentNode?.insertBefore(imageElement, wrapper);
-            wrapper.remove();
-        }
     }
 
     handleImageClick(e: MouseEvent) {
@@ -84,7 +59,6 @@ export default class ImageZoomDragPlugin extends Plugin {
                         }
                     }
                 }
-                this.wrapImageWithFrame(this.activeImage);
                 this.activeImage.classList.add('image-zoom-drag-active');
                 this.activeImage.style.cursor = 'grab';
 
@@ -104,9 +78,6 @@ export default class ImageZoomDragPlugin extends Plugin {
 
     handleWheel(e: WheelEvent) {
         if (!this.activeImage) return;
-
-        // Only zoom if mouse is within the frame
-        if (!this.isMouseWithinFrame(e)) return;
 
         e.preventDefault();
 
@@ -151,18 +122,14 @@ export default class ImageZoomDragPlugin extends Plugin {
 
         if (this.activeImage && this.activeImage.contains(e.target as Node)) {
             // Don't start dragging if clicking on reset button or slider
-            if ((e.target as HTMLElement).closest('.image-zoom-reset-btn') ||
-                (e.target as HTMLElement).closest('.image-zoom-pan-speed-control')) {
+            if ((e.target as HTMLElement).closest('.image-zoom-reset-btn')) {
                 return;
             }
 
-            // Only allow dragging if mouse is within frame
-            if (!this.isMouseWithinFrame(e)) return;
-
             this.isDragging = true;
             // Account for pan speed in initial position calculation
-            this.initialX = e.clientX - (this.offsetX / this.panSpeed);
-            this.initialY = e.clientY - (this.offsetY / this.panSpeed);
+            this.initialX = e.clientX - this.offsetX;
+            this.initialY = e.clientY - this.offsetY;
             this.activeImage.classList.add('is-dragging');
             e.preventDefault();
         }
@@ -175,8 +142,8 @@ export default class ImageZoomDragPlugin extends Plugin {
             this.svgViewBox.x -= e.movementX * (this.svgViewBox.width / this.activeImage.getBoundingClientRect().width);
             this.svgViewBox.y -= e.movementY * (this.svgViewBox.height / this.activeImage.getBoundingClientRect().height);
         } else {
-            this.offsetX += e.movementX;
-            this.offsetY += e.movementY;
+            this.offsetX += e.movementX / this.scale;
+            this.offsetY += e.movementY / this.scale;
         }
 
         this.updateTransform();
@@ -208,7 +175,6 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     resetImage(image: HTMLImageElement | SVGSVGElement) {
-        this.unwrapImageFromFrame(image);
         if (this.isSvg && this.originalViewBox) {
             (image as SVGSVGElement).setAttribute('viewBox', `${this.originalViewBox.x} ${this.originalViewBox.y} ${this.originalViewBox.width} ${this.originalViewBox.height}`);
         }
@@ -260,11 +226,6 @@ export default class ImageZoomDragPlugin extends Plugin {
         this.resetButton = this.createResetButton();
         controlsContainer.appendChild(this.resetButton);
 
-        // Create and add pan speed slider
-        const panSpeedSliderContainer = this.createPanSpeedSlider();
-        this.panSpeedSlider = panSpeedSliderContainer.querySelector('input[type="range"]');
-        controlsContainer.appendChild(panSpeedSliderContainer);
-
         // Add to parent container
         const parent = this.activeImage.parentElement;
         if (parent) {
@@ -280,58 +241,6 @@ export default class ImageZoomDragPlugin extends Plugin {
                 controlsContainer.remove();
             }
             this.resetButton = null;
-            this.panSpeedSlider = null;
         }
-    }
-
-    isMouseWithinFrame(e: MouseEvent): boolean {
-        if (!this.activeImage) return false;
-
-        const rect = this.activeImage.getBoundingClientRect();
-        // Add 8px padding to account for frame offset
-        const framePadding = 8;
-
-        return (
-            e.clientX >= rect.left - framePadding &&
-            e.clientX <= rect.right + framePadding &&
-            e.clientY >= rect.top - framePadding &&
-            e.clientY <= rect.bottom + framePadding
-        );
-    }
-
-    createPanSpeedSlider(): HTMLDivElement {
-        const container = document.createElement('div');
-        container.className = 'image-zoom-pan-speed-control';
-
-        const label = document.createElement('label');
-        label.className = 'image-zoom-pan-speed-label';
-        label.textContent = 'Pan Speed';
-        label.setAttribute('for', 'pan-speed-slider');
-
-        const slider = document.createElement('input');
-        slider.type = 'range';
-        slider.id = 'pan-speed-slider';
-        slider.className = 'image-zoom-pan-speed-slider';
-        slider.min = '0.25';
-        slider.max = '3';
-        slider.step = '0.25';
-        slider.value = this.panSpeed.toString();
-        slider.setAttribute('aria-label', 'Adjust panning speed');
-
-        const valueDisplay = document.createElement('span');
-        valueDisplay.className = 'image-zoom-pan-speed-value';
-        valueDisplay.textContent = `${this.panSpeed.toFixed(2)}x`;
-
-        slider.addEventListener('input', (e) => {
-            e.stopPropagation();
-            this.panSpeed = parseFloat(slider.value);
-            valueDisplay.textContent = `${this.panSpeed.toFixed(2)}x`;
-        });
-
-        container.appendChild(label);
-        container.appendChild(slider);
-        container.appendChild(valueDisplay);
-
-        return container;
     }
 }
