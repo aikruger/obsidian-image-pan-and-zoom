@@ -53,13 +53,17 @@ export default class ImageZoomDragPlugin extends Plugin {
 
         this.registerEvent(
             this.app.vault.on('modify', (file) => {
-                if (file instanceof TFile &&
-                     this.activeImage &&
-                     this.activeImage instanceof HTMLImageElement &&
-                     file.path === this.activeImage.getAttribute('src')) {
-                    // Refresh the image
-                    const timestamp = new Date().getTime();
-                    this.activeImage.src = file.path + '?t=' + timestamp;
+                if (file instanceof TFile && this.activeImage && this.activeImage instanceof HTMLImageElement) {
+                    const imageSrc = this.activeImage.getAttribute('src');
+                    if (!imageSrc) return;
+
+                    const sanitizedSrc = decodeURIComponent(imageSrc.split('?')[0]);
+
+                    if (file.path === sanitizedSrc) {
+                        // Refresh the image
+                        const timestamp = new Date().getTime();
+                        this.activeImage.src = file.path + '?t=' + timestamp;
+                    }
                 }
             })
         );
@@ -82,8 +86,11 @@ export default class ImageZoomDragPlugin extends Plugin {
 
     async openImageInExternalEditor(imageElement: HTMLImageElement) {
         // Get the image file path
-        const imageSrc = imageElement.getAttribute('src');
+        let imageSrc = imageElement.getAttribute('src');
         if (!imageSrc) return;
+
+        // Sanitize the path
+        imageSrc = decodeURIComponent(imageSrc.split('?')[0]);
 
         // Convert to absolute file path
         const adapter = this.app.vault.adapter;
