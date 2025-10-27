@@ -48,7 +48,16 @@ export default class ImageZoomDragPlugin extends Plugin {
         const target = (e.target as HTMLElement).closest('img, svg');
 
         if (target && (target instanceof HTMLImageElement || target instanceof SVGSVGElement)) {
-            // Check if click is within workspace
+            const workspaceSplit = target.closest('.workspace-split');
+            if (!workspaceSplit) return;
+
+            // Check if it has sidebar modifiers
+            if (workspaceSplit.classList.contains('mod-left-split') ||
+                workspaceSplit.classList.contains('mod-right-split')) {
+                return; // Exit if in sidebar
+            }
+
+            // Ensure it's in a valid content area
             if (!target.closest('.workspace-leaf-content')) return;
 
             // Reset previous image if different
@@ -114,9 +123,14 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     handleWheel(e: WheelEvent) {
-        if (!this.activeImage || !this.isMouseWithinFrame(e)) return;
+        if (!this.activeImage) return;
+
+        if (!this.isMouseWithinFrame(e)) return;
+
+        if (!e.altKey) return;
 
         e.preventDefault();
+        e.stopPropagation();
 
         const scaleBy = 1.1;
         const prevScale = this.scale;
@@ -178,12 +192,28 @@ export default class ImageZoomDragPlugin extends Plugin {
     handleMouseMove(e: MouseEvent) {
         if (!this.isDragging || !this.activeImage) return;
 
+        const rect = this.activeImage.getBoundingClientRect();
+        const tolerance = 50; // pixels outside image before stopping
+
+        const isWithinBounds =
+            e.clientX >= rect.left - tolerance &&
+            e.clientX <= rect.right + tolerance &&
+            e.clientY >= rect.top - tolerance &&
+            e.clientY <= rect.bottom + tolerance;
+
+        if (!isWithinBounds) {
+            // Mouse went too far outside - stop dragging
+            this.isDragging = false;
+            this.activeImage.classList.remove('is-dragging');
+            return;
+        }
+
         if (this.isSvg && this.svgViewBox) {
             this.svgViewBox.x -= e.movementX * (this.svgViewBox.width / this.activeImage.getBoundingClientRect().width);
             this.svgViewBox.y -= e.movementY * (this.svgViewBox.height / this.activeImage.getBoundingClientRect().height);
         } else {
-            this.offsetX += e.movementX / this.scale;
-            this.offsetY += e.movementY / this.scale;
+            this.offsetX += e.movementX;
+            this.offsetY += e.movementY;
         }
 
         this.updateTransform();
