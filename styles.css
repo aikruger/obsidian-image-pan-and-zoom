@@ -70,3 +70,35 @@
   max-height: none !important;
   display: block;
 }
+
+.image-zoom-edit-btn {
+    background: rgba(var(--background-primary-rgb, 255, 255, 255), 0.7);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    border: 1px solid rgba(var(--background-modifier-border-rgb, 0, 0, 0), 0.3);
+    border-radius: 4px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-normal);
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.image-zoom-edit-btn:hover {
+    background: rgba(var(--interactive-accent-rgb, 123, 108, 217), 0.9);
+    color: white;
+    border-color: var(--interactive-accent);
+}
+
+.external-editor-examples {
+    font-size: 0.9em;
+    color: var(--text-muted);
+    margin-top: 8px;
+    padding-left: 20px;
+}
+
+.external-editor-examples li {
+    margin: 4px 0;
+}

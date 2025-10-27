@@ -1,6 +1,17 @@
-import { Plugin } from 'obsidian';
+import { Plugin, App, PluginSettingTab, Setting, Notice, TFile, FileSystemAdapter } from 'obsidian';
+
+interface ImageZoomSettings {
+    externalEditorPath: string;
+    useSystemDefault: boolean;
+}
+
+const DEFAULT_SETTINGS: ImageZoomSettings = {
+    externalEditorPath: '',
+    useSystemDefault: true
+}
 
 export default class ImageZoomDragPlugin extends Plugin {
+    settings: ImageZoomSettings;
     private activeImage: HTMLImageElement | SVGSVGElement | null = null;
     private isDragging = false;
     private initialX = 0;
@@ -16,6 +27,10 @@ export default class ImageZoomDragPlugin extends Plugin {
     private resizeObserver: ResizeObserver | null = null;
 
     async onload() {
+        await this.loadSettings();
+
+        this.addSettingTab(new ImageZoomSettingTab(this.app, this));
+
         this.registerDomEvent(document, 'click', this.handleImageClick.bind(this));
         this.registerDomEvent(document, 'wheel', this.handleWheel.bind(this), { passive: false });
         this.registerDomEvent(document, 'mousedown', this.handleMouseDown.bind(this));
@@ -35,12 +50,75 @@ export default class ImageZoomDragPlugin extends Plugin {
                 this.isMouseInFrame = this.isMouseWithinFrame(e);
             }
         });
+
+        this.registerEvent(
+            this.app.vault.on('modify', (file) => {
+                if (file instanceof TFile &&
+                     this.activeImage &&
+                     this.activeImage instanceof HTMLImageElement &&
+                     file.path === this.activeImage.getAttribute('src')) {
+                    // Refresh the image
+                    const timestamp = new Date().getTime();
+                    this.activeImage.src = file.path + '?t=' + timestamp;
+                }
+            })
+        );
     }
 
     onunload() {
         // Event listeners are automatically removed by registerDomEvent
         if (this.resizeObserver) {
             this.resizeObserver.disconnect();
+        }
+    }
+
+    async loadSettings() {
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    }
+
+    async saveSettings() {
+        await this.saveData(this.settings);
+    }
+
+    async openImageInExternalEditor(imageElement: HTMLImageElement) {
+        // Get the image file path
+        const imageSrc = imageElement.getAttribute('src');
+        if (!imageSrc) return;
+
+        // Convert to absolute file path
+        const adapter = this.app.vault.adapter;
+        if (!(adapter instanceof FileSystemAdapter)) {
+            new Notice('This feature is only available on the desktop app.');
+            return;
+        }
+        const imagePath = adapter.getFullPath(imageSrc);
+
+        if (this.settings.useSystemDefault) {
+            // Use Electron's shell.openPath to open with default app
+            require('electron').shell.openPath(imagePath);
+        } else {
+            // Launch specific external editor
+            const editorPath = this.settings.externalEditorPath;
+            if (!editorPath) {
+                new Notice('Please configure external editor path in settings');
+                return;
+            }
+
+            // Use child_process to launch the editor
+            const { spawn } = require('child_process');
+
+            try {
+                // Launch editor with image path as argument
+                spawn(editorPath, [imagePath], {
+                    detached: true,
+                    stdio: 'ignore'
+                }).unref();
+
+                new Notice('Image opened in external editor');
+            } catch (error) {
+                new Notice('Failed to open external editor: ' + error.message);
+                console.error('External editor error:', error);
+            }
         }
     }
 
@@ -308,6 +386,21 @@ export default class ImageZoomDragPlugin extends Plugin {
         this.resetButton = this.createResetButton();
         controlsContainer.appendChild(this.resetButton);
 
+        if (this.activeImage instanceof HTMLImageElement) {
+            const editButton = document.createElement('button');
+            editButton.className = 'image-zoom-edit-btn';
+            editButton.textContent = '✏️ Edit';
+            editButton.title = 'Open in external editor';
+
+            editButton.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                await this.openImageInExternalEditor(this.activeImage as HTMLImageElement);
+            });
+
+            // Add to controls container
+            controlsContainer.appendChild(editButton);
+        }
+
         // Add to parent container
         const parent = this.activeImage.parentElement;
         if (parent) {
@@ -337,5 +430,62 @@ export default class ImageZoomDragPlugin extends Plugin {
             e.clientY >= rect.top &&
             e.clientY <= rect.bottom
         );
+    }
+}
+
+class ImageZoomSettingTab extends PluginSettingTab {
+    plugin: ImageZoomDragPlugin;
+
+    constructor(app: App, plugin: ImageZoomDragPlugin) {
+        super(app, plugin);
+        this.plugin = plugin;
+    }
+
+    display(): void {
+        const {containerEl} = this;
+        containerEl.empty();
+
+        containerEl.createEl('h2', {text: 'Image Zoom & Drag Settings'});
+
+        // Use system default toggle
+        new Setting(containerEl)
+            .setName('Use system default editor')
+            .setDesc('Open images with the default system application')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.useSystemDefault)
+                .onChange(async (value) => {
+                    this.plugin.settings.useSystemDefault = value;
+                    await this.plugin.saveSettings();
+                    this.display(); // Refresh to show/hide path input
+                }));
+
+        // Custom editor path (only show if not using default)
+        if (!this.plugin.settings.useSystemDefault) {
+            new Setting(containerEl)
+                .setName('External editor path')
+                .setDesc('Full path to your image editor (e.g., C:\\Windows\\System32\\mspaint.exe or /usr/bin/gimp)')
+                .addText(text => text
+                    .setPlaceholder('C:\\Program Files\\Adobe\\Photoshop\\photoshop.exe')
+                    .setValue(this.plugin.settings.externalEditorPath)
+                    .onChange(async (value) => {
+                        this.plugin.settings.externalEditorPath = value;
+                        await this.plugin.saveSettings();
+                    }));
+
+            // Add examples
+            containerEl.createEl('div', {
+                text: 'Examples:',
+                cls: 'setting-item-description'
+            });
+            containerEl.createEl('ul', {
+                cls: 'external-editor-examples'
+            }).innerHTML = `
+                <li><strong>MS Paint (Windows):</strong> mspaint.exe</li>
+                <li><strong>Paint.NET (Windows):</strong> C:\\Program Files\\paint.net\\PaintDotNet.exe</li>
+                <li><strong>GIMP (Windows):</strong> C:\\Program Files\\GIMP 2\\bin\\gimp-2.10.exe</li>
+                <li><strong>GIMP (Mac):</strong> /Applications/GIMP.app/Contents/MacOS/gimp</li>
+                <li><strong>Preview (Mac):</strong> open -a Preview</li>
+            `;
+        }
     }
 }
