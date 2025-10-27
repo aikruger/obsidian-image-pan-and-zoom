@@ -123,11 +123,14 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     handleWheel(e: WheelEvent) {
-        if (!this.activeImage || !this.isMouseWithinFrame(e)) return;
+        if (!this.activeImage) return;
 
-        if (!e.ctrlKey) return;
+        if (!this.isMouseWithinFrame(e)) return;
+
+        if (!e.altKey) return;
 
         e.preventDefault();
+        e.stopPropagation();
 
         const scaleBy = 1.1;
         const prevScale = this.scale;
