@@ -85,46 +85,57 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     async openImageInExternalEditor(imageElement: HTMLImageElement) {
-        // Get the image file path
         let imageSrc = imageElement.getAttribute('src');
         if (!imageSrc) return;
 
-        // Sanitize the path
+        // Remove query parameters
         imageSrc = decodeURIComponent(imageSrc.split('?')[0]);
 
-        // Convert to absolute file path
         const adapter = this.app.vault.adapter;
         if (!(adapter instanceof FileSystemAdapter)) {
             new Notice('This feature is only available on the desktop app.');
             return;
         }
-        const imagePath = adapter.getFullPath(imageSrc);
+
+        // Extract just the filename from the src
+        const filename = imageSrc.split('/').pop();
+
+        // Search vault for this filename
+        let file = this.app.vault.getAbstractFileByPath(imageSrc);
+
+        // If not found as direct path, search by name
+        if (!file) {
+            const allFiles = this.app.vault.getFiles();
+            file = allFiles.find(f => f.name === filename) || null;
+        }
+
+        if (!file) {
+            new Notice('Could not locate image file: ' + filename);
+            return;
+        }
+
+        // Now we have the correct TFile, get its full path
+        const imagePath = adapter.getFullPath(file.path);
+
+        console.log("Image src:", imageSrc);
+        console.log("Found file:", file ? file.path : "NOT FOUND");
+        console.log("Full path:", imagePath);
 
         if (this.settings.useSystemDefault) {
-            // Use Electron's shell.openPath to open with default app
             require('electron').shell.openPath(imagePath);
         } else {
-            // Launch specific external editor
             const editorPath = this.settings.externalEditorPath;
             if (!editorPath) {
                 new Notice('Please configure external editor path in settings');
                 return;
             }
-
-            // Use child_process to launch the editor
             const { spawn } = require('child_process');
-
             try {
-                // Launch editor with image path as argument
-                spawn(editorPath, [imagePath], {
-                    detached: true,
-                    stdio: 'ignore'
-                }).unref();
-
+                spawn(editorPath, [imagePath], { detached: true, stdio: 'ignore' }).unref();
                 new Notice('Image opened in external editor');
-            } catch (error) {
-                new Notice('Failed to open external editor: ' + error.message);
-                console.error('External editor error:', error);
+            } catch (h) {
+                new Notice('Failed to open external editor: ' + h.message);
+                console.error('External editor error:', h);
             }
         }
     }
