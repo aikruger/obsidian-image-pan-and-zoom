@@ -67,6 +67,23 @@ export default class ImageZoomDragPlugin extends Plugin {
                 }
             })
         );
+
+        // ADD THIS: Register file-menu event for images
+        this.registerEvent(
+            this.app.workspace.on('file-menu', (menu, file) => {
+                // Only show for image files
+                if (file instanceof TFile && this.isImageFile(file)) {
+                    menu.addItem((item) => {
+                        item
+                            .setTitle('Edit in external app')
+                            .setIcon('pencil')
+                            .onClick(async () => {
+                                await this.openImageInExternalApp(file as TFile);
+                            });
+                    });
+                }
+            })
+        );
     }
 
     onunload() {
@@ -84,60 +101,57 @@ export default class ImageZoomDragPlugin extends Plugin {
         await this.saveData(this.settings);
     }
 
-    async openImageInExternalEditor(imageElement: HTMLImageElement) {
-        let imageSrc = imageElement.getAttribute('src');
-        if (!imageSrc) return;
-
-        // Remove query parameters
-        imageSrc = decodeURIComponent(imageSrc.split('?')[0]);
-
-        const adapter = this.app.vault.adapter;
-        if (!(adapter instanceof FileSystemAdapter)) {
-            new Notice('This feature is only available on the desktop app.');
+    async openImageInExternalApp(file: TFile) {
+        if (!file) {
+            new Notice("Could not locate image file in vault");
             return;
         }
 
-        // Extract just the filename from the src
-        const filename = imageSrc.split('/').pop();
-
-        // Search vault for this filename
-        let file = this.app.vault.getAbstractFileByPath(imageSrc);
-
-        // If not found as direct path, search by name
-        if (!file) {
-            const allFiles = this.app.vault.getFiles();
-            file = allFiles.find(f => f.name === filename) || null;
-        }
-
-        if (!file) {
-            new Notice('Could not locate image file: ' + filename);
-            return;
-        }
-
-        // Now we have the correct TFile, get its full path
-        const imagePath = adapter.getFullPath(file.path);
-
-        console.log("Image src:", imageSrc);
-        console.log("Found file:", file ? file.path : "NOT FOUND");
-        console.log("Full path:", imagePath);
+        let resourcePath = this.app.vault.adapter.getResourcePath(file.path);
+        resourcePath = resourcePath.replace(/^app:\/\/local\//, '');
+        resourcePath = decodeURI(resourcePath);
 
         if (this.settings.useSystemDefault) {
-            require('electron').shell.openPath(imagePath);
+            require("electron").shell.openPath(resourcePath)
+                .then(() => {
+                    new Notice("Image opened in external app");
+                })
+                .catch((err: any) => {
+                    new Notice("Failed to open image: " + err.message);
+                    console.error("Error opening image:", err);
+                    console.error("Path attempted:", resourcePath);
+                });
         } else {
             const editorPath = this.settings.externalEditorPath;
             if (!editorPath) {
-                new Notice('Please configure external editor path in settings');
+                new Notice("Please configure external editor path in settings");
                 return;
             }
-            const { spawn } = require('child_process');
+            const { spawn } = require("child_process");
             try {
-                spawn(editorPath, [imagePath], { detached: true, stdio: 'ignore' }).unref();
-                new Notice('Image opened in external editor');
+                spawn(editorPath, [resourcePath], { detached: true, stdio: 'ignore' }).unref();
+                new Notice("Image opened in external editor");
             } catch (h) {
-                new Notice('Failed to open external editor: ' + h.message);
-                console.error('External editor error:', h);
+                new Notice("Failed to open external editor: " + h.message);
+                console.error("External editor error:", h);
             }
         }
+    }
+
+    async findFileFromImageElement(imageElement: HTMLImageElement): Promise<TFile | null> {
+        let src = imageElement.getAttribute("src");
+        if (!src) {
+            new Notice("Could not get image source");
+            return null;
+        }
+        src = decodeURIComponent(src.split("?")[0]);
+        let file = this.app.vault.getAbstractFileByPath(src);
+        if (!file) {
+            let filename = src.split("/").pop();
+            let allFiles = this.app.vault.getFiles();
+            file = allFiles.find(f => f.name === filename) || null;
+        }
+        return file as TFile;
     }
 
     handleImageClick(e: MouseEvent) {
@@ -412,7 +426,10 @@ export default class ImageZoomDragPlugin extends Plugin {
 
             editButton.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                await this.openImageInExternalEditor(this.activeImage as HTMLImageElement);
+                const file = await this.findFileFromImageElement(this.activeImage as HTMLImageElement);
+                if (file) {
+                    await this.openImageInExternalApp(file);
+                }
             });
 
             // Add to controls container
@@ -448,6 +465,11 @@ export default class ImageZoomDragPlugin extends Plugin {
             e.clientY >= rect.top &&
             e.clientY <= rect.bottom
         );
+    }
+
+    isImageFile(file: TFile) {
+        const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp'];
+        return imageExtensions.includes(file.extension.toLowerCase());
     }
 }
 
