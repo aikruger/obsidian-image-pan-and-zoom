@@ -5,6 +5,20 @@ interface ImageZoomSettings {
     useSystemDefault: boolean;
 }
 
+interface ImageState {
+    isDragging: boolean;
+    initialX: number;
+    initialY: number;
+    offsetX: number;
+    offsetY: number;
+    scale: number;
+    resetButton: HTMLButtonElement | null;
+    isSvg: boolean;
+    originalViewBox: { x: number; y: number; width: number; height: number; } | null;
+    svgViewBox: { x: number; y: number; width: number; height: number; } | null;
+    resizeObserver: ResizeObserver | null;
+}
+
 const DEFAULT_SETTINGS: ImageZoomSettings = {
     externalEditorPath: '',
     useSystemDefault: true
@@ -13,7 +27,7 @@ const DEFAULT_SETTINGS: ImageZoomSettings = {
 export default class ImageZoomDragPlugin extends Plugin {
     settings: ImageZoomSettings;
     // Multi-image state management
-    private zoomedImages = new Map<HTMLImageElement | SVGSVGElement, any>(); // Stores state for each zoomed image
+    private zoomedImages = new Map<HTMLImageElement | SVGSVGElement, ImageState>(); // Stores state for each zoomed image
     private currentDragTarget: HTMLImageElement | SVGSVGElement | null = null; // Track which image is currently being dragged
     private globalResizeObservers = new Set<ResizeObserver>(); // Track all resize observers
     private resizeObserver: ResizeObserver | null = null;
@@ -153,8 +167,8 @@ export default class ImageZoomDragPlugin extends Plugin {
     handleImageClick(e: MouseEvent) {
         if ((e.target as HTMLElement).closest(".modal, .suggestion-container, .mod-left-split, .mod-right-split")) return;
 
-        let target = (e.target as HTMLElement).closest("img, svg");
-        if (target && (target instanceof HTMLImageElement || target instanceof SVGSVGElement)) {
+        const target = (e.target as HTMLElement).closest("img, svg");
+        if (target instanceof HTMLImageElement || target instanceof SVGSVGElement) {
             let workspaceSplit = target.closest(".workspace-split");
             if (!workspaceSplit ||
                 workspaceSplit.classList.contains("mod-left-split") ||
@@ -242,7 +256,7 @@ export default class ImageZoomDragPlugin extends Plugin {
 
     handleWheel(e: WheelEvent) {
         const target = (e.target as HTMLElement).closest("img, svg");
-        if (!target || !this.zoomedImages.has(target)) return;
+        if (!(target instanceof HTMLImageElement || target instanceof SVGSVGElement) || !this.zoomedImages.has(target)) return;
 
         const imageState = this.zoomedImages.get(target);
         if (!this.isMouseWithinFrame(e, target) || !e.altKey) return;
@@ -285,7 +299,7 @@ export default class ImageZoomDragPlugin extends Plugin {
 
     handleMouseDown(e: MouseEvent) {
         const target = (e.target as HTMLElement).closest("img, svg");
-        if (e.button !== 0 || !target || !this.zoomedImages.has(target)) return;
+        if (e.button !== 0 || !(target instanceof HTMLImageElement || target instanceof SVGSVGElement) || !this.zoomedImages.has(target)) return;
 
         const imageState = this.zoomedImages.get(target);
         if (!this.isMouseWithinFrame(e, target) || !target.contains(e.target as Node)) return;
