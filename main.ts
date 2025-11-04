@@ -167,7 +167,7 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     handleImageClick(e: MouseEvent) {
-        if (e.target.closest(".modal, .suggestion-container, .mod-left-split, .mod-right-split")) {
+        if ((e.target as HTMLElement).closest(".modal, .suggestion-container, .mod-left-split, .mod-right-split")) {
             return;
         }
         const target = (e.target as HTMLElement).closest('img, svg');
@@ -252,7 +252,7 @@ export default class ImageZoomDragPlugin extends Plugin {
             return;
         }
 
-        const targetElement = e.target.closest("img, svg");
+        const targetElement = (e.target as HTMLElement).closest("img, svg");
         if (targetElement !== this.activeImage) {
             return;
         }
@@ -305,7 +305,7 @@ export default class ImageZoomDragPlugin extends Plugin {
     handleMouseDown(e: MouseEvent) {
         if (e.button !== 0 || !this.activeImage) return;
 
-        const targetElement = e.target.closest("img, svg");
+        const targetElement = (e.target as HTMLElement).closest("img, svg");
         if (targetElement !== this.activeImage) {
             return;
         }
