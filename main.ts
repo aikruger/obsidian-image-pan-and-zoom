@@ -84,6 +84,18 @@ export default class ImageZoomDragPlugin extends Plugin {
                 }
             })
         );
+
+        this.registerEvent(this.app.workspace.on("active-leaf-change", () => {
+            if (this.activeImage) {
+                this.resetImage(this.activeImage);
+            }
+        }));
+
+        this.registerEvent(this.app.workspace.on("layout-change", () => {
+            if (this.activeImage) {
+                this.resetImage(this.activeImage);
+            }
+        }));
     }
 
     onunload() {
@@ -155,6 +167,9 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     handleImageClick(e: MouseEvent) {
+        if (e.target.closest(".modal, .suggestion-container, .mod-left-split, .mod-right-split")) {
+            return;
+        }
         const target = (e.target as HTMLElement).closest('img, svg');
 
         if (target && (target instanceof HTMLImageElement || target instanceof SVGSVGElement)) {
@@ -233,7 +248,14 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     handleWheel(e: WheelEvent) {
-        if (!this.activeImage) return;
+        if (!this.activeImage) {
+            return;
+        }
+
+        const targetElement = e.target.closest("img, svg");
+        if (targetElement !== this.activeImage) {
+            return;
+        }
 
         if (!this.isMouseWithinFrame(e)) return;
 
@@ -281,8 +303,12 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     handleMouseDown(e: MouseEvent) {
-        // Only respond to left click
-        if (e.button !== 0) return;
+        if (e.button !== 0 || !this.activeImage) return;
+
+        const targetElement = e.target.closest("img, svg");
+        if (targetElement !== this.activeImage) {
+            return;
+        }
 
         if (this.activeImage && this.isMouseWithinFrame(e) && this.activeImage.contains(e.target as Node)) {
             // Don't start dragging if clicking on reset button or slider
@@ -303,18 +329,12 @@ export default class ImageZoomDragPlugin extends Plugin {
         if (!this.isDragging || !this.activeImage) return;
 
         const rect = this.activeImage.getBoundingClientRect();
-        const tolerance = 50; // pixels outside image before stopping
-
-        const isWithinBounds =
-            e.clientX >= rect.left - tolerance &&
-            e.clientX <= rect.right + tolerance &&
-            e.clientY >= rect.top - tolerance &&
-            e.clientY <= rect.bottom + tolerance;
-
-        if (!isWithinBounds) {
-            // Mouse went too far outside - stop dragging
+        const buffer = 100; // Allow generous drag area
+        if (e.clientX < rect.left - buffer || e.clientX > rect.right + buffer ||
+            e.clientY < rect.top - buffer || e.clientY > rect.bottom + buffer) {
+            // Stop dragging if mouse moves too far from image
             this.isDragging = false;
-            this.activeImage.classList.remove('is-dragging');
+            this.activeImage.classList.remove("is-dragging");
             return;
         }
 
