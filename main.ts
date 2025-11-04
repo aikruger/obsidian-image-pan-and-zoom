@@ -182,7 +182,7 @@ export default class ImageZoomDragPlugin extends Plugin {
             }
 
             // Create new zoom state for this image
-            const imageState = {
+            const imageState: ImageState = {
                 isDragging: false,
                 initialX: 0,
                 initialY: 0,
@@ -201,13 +201,15 @@ export default class ImageZoomDragPlugin extends Plugin {
                 const svg = target as SVGSVGElement;
                 const viewBox = svg.getAttribute("viewBox");
                 if (viewBox) {
-                    imageState.originalViewBox = this.parseViewBox(viewBox);
-                    if (imageState.originalViewBox) {
-                        imageState.svgViewBox = { ...imageState.originalViewBox };
+                    const parsedViewBox = this.parseViewBox(viewBox);
+                    if (parsedViewBox) {
+                        imageState.originalViewBox = parsedViewBox;
+                        imageState.svgViewBox = { ...parsedViewBox };
                     }
                 }
-                imageState.resizeObserver = this.setupDynamicResize(svg);
-                if (imageState.resizeObserver) {
+                const resizeObserver = this.setupDynamicResize(svg);
+                if (resizeObserver) {
+                    imageState.resizeObserver = resizeObserver;
                     this.globalResizeObservers.add(imageState.resizeObserver);
                 }
             }
@@ -259,7 +261,7 @@ export default class ImageZoomDragPlugin extends Plugin {
         if (!(target instanceof HTMLImageElement || target instanceof SVGSVGElement) || !this.zoomedImages.has(target)) return;
 
         const imageState = this.zoomedImages.get(target);
-        if (!this.isMouseWithinFrame(e, target) || !e.altKey) return;
+        if (!imageState || !this.isMouseWithinFrame(e, target) || !e.altKey) return;
 
         e.preventDefault();
         e.stopPropagation();
@@ -302,7 +304,7 @@ export default class ImageZoomDragPlugin extends Plugin {
         if (e.button !== 0 || !(target instanceof HTMLImageElement || target instanceof SVGSVGElement) || !this.zoomedImages.has(target)) return;
 
         const imageState = this.zoomedImages.get(target);
-        if (!this.isMouseWithinFrame(e, target) || !target.contains(e.target as Node)) return;
+        if (!imageState || !this.isMouseWithinFrame(e, target) || !target.contains(e.target as Node)) return;
 
         if ((e.target as HTMLElement).closest(".image-zoom-reset-btn")) return;
 
