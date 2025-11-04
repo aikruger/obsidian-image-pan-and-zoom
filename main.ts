@@ -117,19 +117,26 @@ export default class ImageZoomDragPlugin extends Plugin {
             return;
         }
 
-        let resourcePath = this.app.vault.adapter.getResourcePath(file.path);
-        resourcePath = resourcePath.replace(/^app:\/\/local\//, '');
-        resourcePath = decodeURI(resourcePath);
+        // Try to get the direct file path via the vault adapter
+        let filePath = file.path;
+
+        // If using OneDrive or a sync folder, handle Win path decode
+        if (this.app.vault.adapter instanceof FileSystemAdapter) {
+            // Get full filesystem path (most reliable and works with OneDrive)
+            filePath = require("path").join(this.app.vault.adapter.getBasePath(), filePath);
+        }
+
+        filePath = require("path").normalize(filePath); // Clean any stray slashes
 
         if (this.settings.useSystemDefault) {
-            require("electron").shell.openPath(resourcePath)
+            require("electron").shell.openPath(filePath)
                 .then(() => {
                     new Notice("Image opened in external app");
                 })
-                .catch((err: any) => {
-                    new Notice("Failed to open image: " + err.message);
-                    console.error("Error opening image:", err);
-                    console.error("Path attempted:", resourcePath);
+                .catch((i: any) => {
+                    new Notice("Failed to open image: " + i.message);
+                    console.error("Error opening image:", i);
+                    console.error("Path attempted:", filePath);
                 });
         } else {
             const editorPath = this.settings.externalEditorPath;
@@ -139,7 +146,7 @@ export default class ImageZoomDragPlugin extends Plugin {
             }
             const { spawn } = require("child_process");
             try {
-                spawn(editorPath, [resourcePath], { detached: true, stdio: 'ignore' }).unref();
+                spawn(editorPath, [filePath], { detached: true, stdio: 'ignore' }).unref();
                 new Notice("Image opened in external editor");
             } catch (h) {
                 new Notice("Failed to open external editor: " + h.message);
