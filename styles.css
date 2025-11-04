@@ -102,3 +102,15 @@
 .external-editor-examples li {
     margin: 4px 0;
 }
+
+/* Prevent zoom from affecting modal images */
+.modal .image-zoom-drag-active {
+    transform: none !important;
+    cursor: default !important;
+}
+
+/* Prevent zoom from affecting sidebar images */
+.mod-left-split .image-zoom-drag-active, .mod-right-split .image-zoom-drag-active {
+    transform: none !important;
+    cursor: default !important;
+}
