@@ -173,25 +173,6 @@ export default class ImageZoomDragPlugin extends Plugin {
 
     handleImageClick(e: MouseEvent) {
         if (!e.altKey) return;
-
-        const target = (e.target as HTMLElement).closest('img, svg');
-
-        if (target && (target instanceof HTMLImageElement || target instanceof SVGSVGElement)) {
-            const workspaceSplit = target.closest('.workspace-split');
-            if (!workspaceSplit) return;
-
-            // Check if it has sidebar modifiers
-            if (workspaceSplit.classList.contains('mod-left-split') ||
-                workspaceSplit.classList.contains('mod-right-split')) {
-                return; // Exit if in sidebar
-            }
-
-            // Ensure it's in a valid content area
-            if (!target.closest('.workspace-leaf-content')) return;
-
-            // Reset previous image if different
-            if (this.activeImage && this.activeImage !== target) {
-                this.resetImage(this.activeImage);
         if ((e.target as HTMLElement).closest(".modal, .suggestion-container, .mod-left-split, .mod-right-split")) return;
 
         const target = (e.target as HTMLElement).closest("img, svg");
