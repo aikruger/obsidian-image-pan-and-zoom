@@ -155,6 +155,8 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     handleImageClick(e: MouseEvent) {
+        if (!e.altKey) return;
+
         const target = (e.target as HTMLElement).closest('img, svg');
 
         if (target && (target instanceof HTMLImageElement || target instanceof SVGSVGElement)) {
