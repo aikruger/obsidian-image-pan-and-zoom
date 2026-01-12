@@ -146,7 +146,13 @@ export default class ImageZoomDragPlugin extends Plugin {
             }
             const { spawn } = require("child_process");
             try {
-                spawn(editorPath, [filePath], { detached: true, stdio: 'ignore' }).unref();
+                // On Windows, use shell: true to properly handle paths with spaces and simple executable names
+                const isWindows = process.platform === 'win32';
+                spawn(editorPath, [filePath], { 
+                    detached: true, 
+                    stdio: 'ignore',
+                    shell: isWindows 
+                }).unref();
                 new Notice("Image opened in external editor");
             } catch (h) {
                 new Notice("Failed to open external editor: " + h.message);
