@@ -148,15 +148,28 @@ export default class ImageZoomDragPlugin extends Plugin {
             try {
                 // On Windows, use shell: true to properly handle paths with spaces and simple executable names
                 const isWindows = process.platform === 'win32';
-                spawn(editorPath, [filePath], { 
-                    detached: true, 
-                    stdio: 'ignore',
-                    shell: isWindows 
-                }).unref();
+                
+                if (isWindows) {
+                    // On Windows with shell, construct command string with proper quoting
+                    const cmd = `"${editorPath}" "${filePath}"`;
+                    spawn(cmd, { 
+                        detached: true, 
+                        stdio: 'ignore',
+                        shell: true 
+                    }).unref();
+                } else {
+                    // On non-Windows platforms, pass arguments as array
+                    spawn(editorPath, [filePath], { 
+                        detached: true, 
+                        stdio: 'ignore'
+                    }).unref();
+                }
                 new Notice("Image opened in external editor");
             } catch (h) {
                 new Notice("Failed to open external editor: " + h.message);
                 console.error("External editor error:", h);
+                console.error("Editor path:", editorPath);
+                console.error("File path:", filePath);
             }
         }
     }
