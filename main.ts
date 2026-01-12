@@ -117,21 +117,39 @@ export default class ImageZoomDragPlugin extends Plugin {
             return;
         }
 
-        // Try to get the direct file path via the vault adapter
+        // Get the clean file path (remove any query parameters)
         let filePath = file.path;
+        
+        // Strip query parameters if present (e.g., ?timestamp)
+        if (filePath.includes('?')) {
+            filePath = filePath.split('?')[0];
+        }
 
         // If using OneDrive or a sync folder, handle Win path decode
         if (this.app.vault.adapter instanceof FileSystemAdapter) {
             // Get full filesystem path (most reliable and works with OneDrive)
-            filePath = require("path").join(this.app.vault.adapter.getBasePath(), filePath);
+            const basePath = this.app.vault.adapter.getBasePath();
+            filePath = require("path").join(basePath, filePath);
         }
 
-        filePath = require("path").normalize(filePath); // Clean any stray slashes
+        // Normalize path to clean any duplicate slashes and ensure proper format
+        filePath = require("path").normalize(filePath);
+
+        // Log the file path for debugging
+        console.log("Opening image file:", filePath);
+        console.log("Original file.path:", file.path);
 
         if (this.settings.useSystemDefault) {
             require("electron").shell.openPath(filePath)
-                .then(() => {
-                    new Notice("Image opened in external app");
+                .then((errorMessage: string) => {
+                    // openPath returns an empty string on success, or an error message on failure
+                    if (errorMessage) {
+                        new Notice("Failed to open image: " + errorMessage);
+                        console.error("Error opening image:", errorMessage);
+                        console.error("Path attempted:", filePath);
+                    } else {
+                        new Notice("Image opened in external app");
+                    }
                 })
                 .catch((i: any) => {
                     new Notice("Failed to open image: " + i.message);
@@ -148,9 +166,12 @@ export default class ImageZoomDragPlugin extends Plugin {
             try {
                 spawn(editorPath, [filePath], { detached: true, stdio: 'ignore' }).unref();
                 new Notice("Image opened in external editor");
+                console.log("Spawned external editor:", editorPath, "with file:", filePath);
             } catch (h) {
                 new Notice("Failed to open external editor: " + h.message);
                 console.error("External editor error:", h);
+                console.error("Editor path:", editorPath);
+                console.error("File path:", filePath);
             }
         }
     }
