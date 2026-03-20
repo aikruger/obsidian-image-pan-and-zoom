@@ -1,8 +1,15 @@
-import { Plugin, App, PluginSettingTab, Setting, Notice, TFile, FileSystemAdapter } from 'obsidian';
+import { Plugin, App, PluginSettingTab, Setting, Notice, TFile, FileSystemAdapter, Modal, Editor, TextComponent } from 'obsidian';
+
+interface ImageBgConfig {
+    [normalizedPath: string]: string;
+}
 
 interface ImageZoomSettings {
     externalEditorPath: string;
     useSystemDefault: boolean;
+    defaultBg: string;
+    imageBgConfig: ImageBgConfig;
+    applyBgOnZoomOnly: boolean;
 }
 
 interface ImageState {
@@ -17,11 +24,15 @@ interface ImageState {
     originalViewBox: { x: number; y: number; width: number; height: number; } | null;
     svgViewBox: { x: number; y: number; width: number; height: number; } | null;
     resizeObserver: ResizeObserver | null;
+    appliedBg: boolean;
 }
 
 const DEFAULT_SETTINGS: ImageZoomSettings = {
     externalEditorPath: '',
-    useSystemDefault: true
+    useSystemDefault: true,
+    defaultBg: '',
+    imageBgConfig: {},
+    applyBgOnZoomOnly: false
 }
 
 export default class ImageZoomDragPlugin extends Plugin {
@@ -89,6 +100,40 @@ export default class ImageZoomDragPlugin extends Plugin {
                 }
             })
         );
+
+        // Register markdown post-processor to apply background colours in "always show" mode
+        this.registerMarkdownPostProcessor((element) => {
+            if (this.settings.applyBgOnZoomOnly) return;
+            element.querySelectorAll<HTMLImageElement>('.image-embed img').forEach((imgEl) => {
+                this.applyBackgroundToContainer(imgEl);
+            });
+        });
+
+        // Command: set background colour for the image embed at the cursor position
+        this.addCommand({
+            id: 'set-image-background-colour',
+            name: 'Set background colour for image under cursor',
+            editorCallback: (editor: Editor) => {
+                const cursor = editor.getCursor();
+                const line = editor.getLine(cursor.line);
+                const imageMatch = line.match(/!\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/);
+                if (!imageMatch) {
+                    new Notice('No image embed found at cursor position');
+                    return;
+                }
+                const imageLinkPath = imageMatch[1].trim();
+                const activeFile = this.app.workspace.getActiveFile();
+                const resolved = this.app.metadataCache.getFirstLinkpathDest(
+                    imageLinkPath,
+                    activeFile?.path ?? ''
+                );
+                if (!(resolved instanceof TFile)) {
+                    new Notice('Could not resolve image file: ' + imageLinkPath);
+                    return;
+                }
+                new ImageBgColourModal(this.app, this, resolved).open();
+            }
+        });
     }
 
     onunload() {
@@ -239,7 +284,8 @@ export default class ImageZoomDragPlugin extends Plugin {
                 isSvg: target instanceof SVGSVGElement,
                 originalViewBox: null,
                 svgViewBox: null,
-                resizeObserver: null
+                resizeObserver: null,
+                appliedBg: false
             };
 
             // Handle SVG-specific setup
@@ -265,6 +311,12 @@ export default class ImageZoomDragPlugin extends Plugin {
             target.classList.add("image-zoom-drag-active");
             target.style.cursor = "grab";
             this.showResetButton(target);
+
+            // Apply background colour when zoom is activated
+            if (target instanceof HTMLImageElement) {
+                const bg = this.applyBackgroundToContainer(target);
+                if (bg) imageState.appliedBg = true;
+            }
         }
     }
 
@@ -441,6 +493,15 @@ export default class ImageZoomDragPlugin extends Plugin {
         target.classList.remove("image-zoom-drag-active");
 
         this.hideResetButton(target);
+
+        // Remove background colour if in zoomed-only mode
+        if (imageState.appliedBg && this.settings.applyBgOnZoomOnly && target instanceof HTMLImageElement) {
+            const container = this.getImageContainer(target);
+            if (container) {
+                container.style.backgroundColor = '';
+            }
+        }
+
         this.zoomedImages.delete(target);
     }
 
@@ -514,6 +575,70 @@ export default class ImageZoomDragPlugin extends Plugin {
                e.clientY >= rect.top && e.clientY <= rect.bottom;
     }
 
+    normalizeImagePath(path: string): string {
+        return path.replace(/\\/g, '/');
+    }
+
+    getImageBg(vaultPath: string): string {
+        const normalized = this.normalizeImagePath(vaultPath);
+        return this.settings.imageBgConfig[normalized] ?? this.settings.defaultBg ?? '';
+    }
+
+    /**
+     * Applies the configured background colour to the container of an image element.
+     * Checks for an inline `bg=<value>` directive in the img alt first, then the
+     * persisted imageBgConfig, then the defaultBg setting.
+     * Returns the applied colour string, or empty string if no bg was applied.
+     */
+    applyBackgroundToContainer(imgEl: HTMLImageElement): string {
+        const inlineBg = this.parseInlineBg(imgEl);
+        const vaultPath = this.resolveVaultPathFromElement(imgEl);
+        const bg = inlineBg || (vaultPath ? this.getImageBg(vaultPath) : '');
+        if (bg) {
+            const container = this.getImageContainer(imgEl);
+            if (container) {
+                container.classList.add('image-pan-zoom-container');
+                container.style.backgroundColor = bg;
+            }
+        }
+        return bg;
+    }
+
+    resolveVaultPathFromElement(imgEl: HTMLImageElement): string | null {
+        // Prefer the src attribute on the .image-embed wrapper (vault-relative path)
+        const wrapper = imgEl.closest('.image-embed');
+        if (wrapper) {
+            const src = wrapper.getAttribute('src');
+            if (src) return src;
+        }
+        // Fallback: parse the img src URL
+        let src = imgEl.getAttribute('src');
+        if (!src) return null;
+        src = decodeURIComponent(src.split('?')[0]);
+        // Try direct vault path lookup first
+        const directFile = this.app.vault.getAbstractFileByPath(src);
+        if (directFile instanceof TFile) return directFile.path;
+        // Last resort: match by filename via metadata cache
+        const filename = src.split('/').pop();
+        if (filename) {
+            const file = this.app.metadataCache.getFirstLinkpathDest(filename, '');
+            if (file instanceof TFile) return file.path;
+        }
+        return null;
+    }
+
+    parseInlineBg(imgEl: HTMLImageElement): string | null {
+        const alt = imgEl.getAttribute('alt') || '';
+        // Matches `bg=<value>` in the alt text (e.g. from `![[image.png|bg=#ffffff]]`).
+        // Allowed colour value characters: anything except whitespace, pipe, and comma.
+        const bgMatch = alt.match(/\bbg=([^\s|,]+)/i);
+        return bgMatch ? bgMatch[1] : null;
+    }
+
+    getImageContainer(target: HTMLImageElement): HTMLElement | null {
+        return (target.closest('.image-embed') as HTMLElement) || target.parentElement;
+    }
+
     isImageFile(file: TFile) {
         const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp'];
         return imageExtensions.includes(file.extension.toLowerCase());
@@ -574,5 +699,111 @@ class ImageZoomSettingTab extends PluginSettingTab {
                 <li><strong>Preview (Mac):</strong> open -a Preview</li>
             `;
         }
+
+        // Background colour settings
+        containerEl.createEl('h3', { text: 'Background Colour' });
+
+        let defaultBgText: TextComponent | undefined;
+        new Setting(containerEl)
+            .setName('Default background colour')
+            .setDesc('Applied behind images without a specific override. Leave empty for transparent. Use any CSS colour value (e.g. #000000, transparent).')
+            .addColorPicker(picker => {
+                const hex = this.plugin.settings.defaultBg.match(/^#[0-9a-fA-F]{6}$/i)
+                    ? this.plugin.settings.defaultBg : '#000000';
+                picker.setValue(hex);
+                picker.onChange(async (value) => {
+                    this.plugin.settings.defaultBg = value;
+                    if (defaultBgText) defaultBgText.setValue(value);
+                    await this.plugin.saveSettings();
+                });
+            })
+            .addText(text => {
+                defaultBgText = text;
+                text.setPlaceholder('transparent or #rrggbb')
+                    .setValue(this.plugin.settings.defaultBg)
+                    .onChange(async (value) => {
+                        this.plugin.settings.defaultBg = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
+
+        new Setting(containerEl)
+            .setName('Apply background when zoomed only')
+            .setDesc('When enabled, the background colour is only shown while an image is actively zoomed. When disabled, backgrounds are always visible.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.applyBgOnZoomOnly)
+                .onChange(async (value) => {
+                    this.plugin.settings.applyBgOnZoomOnly = value;
+                    await this.plugin.saveSettings();
+                }));
+    }
+}
+
+class ImageBgColourModal extends Modal {
+    plugin: ImageZoomDragPlugin;
+    file: TFile;
+
+    constructor(app: App, plugin: ImageZoomDragPlugin, file: TFile) {
+        super(app);
+        this.plugin = plugin;
+        this.file = file;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h3', { text: 'Set background colour' });
+        contentEl.createEl('p', { text: `Image: ${this.file.name}`, cls: 'setting-item-description' });
+
+        const normalized = this.plugin.normalizeImagePath(this.file.path);
+        const currentBg = this.plugin.settings.imageBgConfig[normalized] ?? '';
+        let colourValue = currentBg;
+
+        let textComp: TextComponent | undefined;
+        new Setting(contentEl)
+            .setName('Colour')
+            .setDesc('CSS colour value (e.g. #ffffff, transparent, rgba(0,0,0,0.5)). The colour picker handles solid hex colours; use the text field for other values.')
+            .addColorPicker(picker => {
+                const hex = currentBg.match(/^#[0-9a-fA-F]{6}$/i) ? currentBg : '#000000';
+                picker.setValue(hex);
+                picker.onChange(value => {
+                    colourValue = value;
+                    if (textComp) textComp.setValue(value);
+                });
+            })
+            .addText(text => {
+                textComp = text;
+                text.setPlaceholder('transparent or #rrggbb')
+                    .setValue(currentBg)
+                    .onChange(value => { colourValue = value; });
+            });
+
+        new Setting(contentEl)
+            .addButton(btn => btn
+                .setButtonText('Clear override')
+                .setWarning()
+                .onClick(async () => {
+                    delete this.plugin.settings.imageBgConfig[normalized];
+                    await this.plugin.saveSettings();
+                    this.close();
+                    new Notice('Background colour override removed for ' + this.file.name);
+                }))
+            .addButton(btn => btn
+                .setButtonText('Save')
+                .setCta()
+                .onClick(async () => {
+                    const trimmed = colourValue.trim();
+                    if (trimmed) {
+                        this.plugin.settings.imageBgConfig[normalized] = trimmed;
+                    } else {
+                        delete this.plugin.settings.imageBgConfig[normalized];
+                    }
+                    await this.plugin.saveSettings();
+                    this.close();
+                    new Notice(`Background colour ${trimmed ? 'saved' : 'cleared'} for ${this.file.name}`);
+                }));
+    }
+
+    onClose() {
+        this.contentEl.empty();
     }
 }

@@ -114,3 +114,14 @@
     transform: none !important;
     cursor: default !important;
 }
+
+/* Background colour container */
+.image-pan-zoom-container {
+    /* Fallback, overridden by inline style when a per-image colour is set */
+    background-color: var(--image-pan-zoom-bg, transparent);
+}
+
+/* Optional dark-theme default */
+.theme-dark .image-pan-zoom-container {
+    --image-pan-zoom-bg: #000000;
+}
