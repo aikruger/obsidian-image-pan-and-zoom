@@ -1,4 +1,4 @@
-import { Plugin, App, PluginSettingTab, Setting, Notice, TFile, FileSystemAdapter } from 'obsidian';
+import { Plugin, App, PluginSettingTab, Setting, Notice, TFile, FileSystemAdapter, Menu } from 'obsidian';
 
 import { ImageInteractionController } from './src/image-interaction-controller';
 
@@ -31,8 +31,8 @@ interface ImageState {
         cursor: string | null;
         width: string | null;
         height: string | null;
-        position: string | null; // for parent
     };
+    parentElement: HTMLElement | null;
     originalAttributes: {
         viewBox: string | null;
         width: string | null;
@@ -56,12 +56,33 @@ export default class ImageZoomDragPlugin extends Plugin {
     private currentDragTarget: HTMLImageElement | SVGSVGElement | null = null; // Track which image is currently being dragged
     private globalResizeObservers = new Set<ResizeObserver>(); // Track all resize observers
     private resizeObserver: ResizeObserver | null = null;
+
+    // Reference counting for modified parent elements (position: relative)
+    private parentRegistry = new Map<HTMLElement, { count: number, originalPosition: string }>();
+
     private interactionController: ImageInteractionController;
 
 
 
     async onload() {
         await this.loadSettings();
+
+        this.addCommand({
+            id: 'toggle-exclusive-image-handling',
+            name: 'Toggle exclusive image handling',
+            icon: 'image',
+            callback: () => {
+                void this.setExclusiveImageHandling(!this.settings.disableNativeImageInteractions, 'command');
+            }
+        });
+
+        console.log("[Image Pan and Zoom] Loaded", {
+            pluginId: this.manifest.id,
+            version: this.manifest.version,
+            buildRevision: typeof BUILD_REVISION !== 'undefined' ? BUILD_REVISION : 'unknown',
+            exclusiveImageHandling: this.settings.disableNativeImageInteractions,
+            toggleCommandRegistered: true
+        });
 
         this.addSettingTab(new ImageZoomSettingTab(this.app, this));
 
@@ -71,11 +92,9 @@ export default class ImageZoomDragPlugin extends Plugin {
         // Register for main document
         this.interactionController.registerDocument(document);
 
-        // Handle blur to end drags
-        this.registerDomEvent(window, 'blur', () => this.endCurrentDrag('window-blur'));
 
         // Register for popout windows if supported
-        if ((this.app.workspace as any).on) {
+        if (this.app.workspace.on) {
             this.registerEvent(
                 this.app.workspace.on('window-open', (win, window) => {
                     this.interactionController.registerDocument(window.document);
@@ -89,24 +108,13 @@ export default class ImageZoomDragPlugin extends Plugin {
             );
         }
 
-        this.registerDomEvent(document, 'mousemove', this.handleMouseMove.bind(this));
-        this.registerDomEvent(document, 'mouseup', this.handleMouseUp.bind(this));
-
-        // Add Escape key handler for reset
-        this.registerDomEvent(document, 'keydown', (e) => {
-            if (e.key === 'Escape' && this.zoomedImages.size > 0) {
-                // Reset all zoomed images when Escape is pressed
-                this.zoomedImages.forEach((imageState, target) => {
-                    this.resetImage(target);
-                });
-            }
-        });
 
         this.registerEvent(
             this.app.vault.on('modify', (file) => {
                 this.zoomedImages.forEach((imageState, target) => {
-                    if (target instanceof HTMLImageElement && file instanceof TFile) {
-                        const imageSrc = target.getAttribute('src');
+                    if (target.tagName.toLowerCase() === 'img' && file instanceof TFile) {
+                        const imgTarget = target as HTMLImageElement;
+                        const imageSrc = imgTarget.getAttribute('src');
                         if (!imageSrc) return;
 
                         const sanitizedSrc = decodeURIComponent(imageSrc.split('?')[0]);
@@ -114,7 +122,7 @@ export default class ImageZoomDragPlugin extends Plugin {
                         if (file.path === sanitizedSrc) {
                             // Refresh the image
                             const timestamp = new Date().getTime();
-                            target.src = file.path + '?t=' + timestamp;
+                            imgTarget.src = file.path + '?t=' + timestamp;
                         }
                     }
                 });
@@ -126,6 +134,16 @@ export default class ImageZoomDragPlugin extends Plugin {
             this.app.workspace.on('file-menu', (menu, file) => {
                 // Only show for image files
                 if (file instanceof TFile && this.isImageFile(file)) {
+                    const isTakeover = this.settings.disableNativeImageInteractions;
+                    menu.addItem((item) => {
+                        item
+                            .setTitle(isTakeover ? 'Disable exclusive image handling' : 'Enable exclusive image handling')
+                            .setIcon(isTakeover ? 'image-minus' : 'image-plus')
+                            .onClick(() => {
+                                void this.setExclusiveImageHandling(!isTakeover, 'file-menu');
+                            });
+                    });
+
                     menu.addItem((item) => {
                         item
                             .setTitle('Edit in external app')
@@ -181,8 +199,114 @@ export default class ImageZoomDragPlugin extends Plugin {
         });
     }
 
+
+    async showImageManagementMenu(event: MouseEvent, target: HTMLImageElement | SVGSVGElement) {
+        const menu = new Menu();
+
+        // 1. Disable exclusive image handling
+        menu.addItem((item) => {
+            item
+                .setTitle('Disable exclusive image handling')
+                .setIcon('image-minus')
+                .onClick(() => {
+                    void this.setExclusiveImageHandling(false, 'image-menu');
+                });
+        });
+
+        // 2. Activate / Reset
+        const isActive = this.isImageActive(target);
+        if (isActive) {
+            menu.addItem((item) => {
+                item
+                    .setTitle('Reset zoom and pan')
+                    .setIcon('reset')
+                    .onClick(() => {
+                        this.resetImage(target);
+                    });
+            });
+        } else {
+            menu.addItem((item) => {
+                item
+                    .setTitle('Activate pan and zoom')
+                    .setIcon('zoom-in')
+                    .onClick(() => {
+                        this.activateImage(target);
+                    });
+            });
+        }
+
+        // 3. Edit in external app (only for vault image files)
+        if (target.tagName.toLowerCase() === 'img') {
+            const file = await this.findFileFromImageElement(target as HTMLImageElement);
+            if (file) {
+                menu.addItem((item) => {
+                    item
+                        .setTitle('Edit in external app')
+                        .setIcon('pencil')
+                        .onClick(async () => {
+                            await this.openImageInExternalApp(file);
+                        });
+                });
+            }
+        }
+
+        menu.showAtMouseEvent(event);
+    }
+
     async loadSettings() {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    }
+
+
+    private isTogglingExclusiveHandling = false;
+
+    async setExclusiveImageHandling(
+        enabled: boolean,
+        source: 'settings' | 'command' | 'image-menu' | 'file-menu'
+    ): Promise<void> {
+        if (this.isTogglingExclusiveHandling) {
+            return;
+        }
+        this.isTogglingExclusiveHandling = true;
+
+        const previous = this.settings.disableNativeImageInteractions;
+
+        try {
+            this.endCurrentDrag("exclusive-handling-changed");
+
+            this.settings.disableNativeImageInteractions = enabled;
+            await this.saveSettings();
+
+            console.log("[Image Pan and Zoom] Exclusive image handling changed", {
+                previous,
+                enabled,
+                source
+            });
+
+            if (source !== 'settings') {
+                new Notice(enabled ? "Exclusive image handling enabled" : "Exclusive image handling disabled");
+            }
+
+            // Refresh settings UI if open
+            const activeTab = (this.app as any).setting?.activeTab;
+            if (activeTab && activeTab.id === this.manifest.id) {
+                activeTab.display();
+            }
+        } catch (error) {
+            console.error(
+                "[Image Pan and Zoom] Failed to persist exclusive image handling",
+                error
+            );
+            this.settings.disableNativeImageInteractions = previous;
+
+            // Refresh settings UI if open to reflect fallback
+            const activeTab = (this.app as any).setting?.activeTab;
+            if (activeTab && activeTab.id === this.manifest.id) {
+                activeTab.display();
+            }
+        } finally {
+            this.isTogglingExclusiveHandling = false;
+        }
     }
 
     async saveSettings() {
@@ -288,6 +412,15 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
 
+
+    handleEscape(e: KeyboardEvent) {
+        if (this.zoomedImages.size > 0) {
+            this.zoomedImages.forEach((imageState, target) => {
+                this.resetImage(target);
+            });
+        }
+    }
+
     isImageActive(target: HTMLImageElement | SVGSVGElement): boolean {
         return this.zoomedImages.has(target);
     }
@@ -303,7 +436,7 @@ export default class ImageZoomDragPlugin extends Plugin {
             scale: 1,
             resetButton: null,
             controlsContainer: null,
-            isSvg: target instanceof SVGSVGElement,
+            isSvg: target.tagName.toLowerCase() === 'svg',
             originalViewBox: null,
             svgViewBox: null,
             resizeObserver: null,
@@ -313,9 +446,10 @@ export default class ImageZoomDragPlugin extends Plugin {
                 transition: target.style.transition || null,
                 cursor: target.style.cursor || null,
                 width: target.style.width || null,
-                height: target.style.height || null,
-                position: target.parentElement ? target.parentElement.style.position || null : null
+                height: target.style.height || null
             },
+            parentElement: target.parentElement,
+
             originalAttributes: {
                 viewBox: target.getAttribute("viewBox"),
                 width: target.getAttribute("width"),
@@ -576,12 +710,15 @@ export default class ImageZoomDragPlugin extends Plugin {
             target.style.height = "";
         }
 
-        // Restore parent position
-        if (target.parentElement) {
-            if (imageState.originalStyles.position !== null) {
-                target.parentElement.style.position = imageState.originalStyles.position;
-            } else {
-                target.parentElement.style.position = "";
+        // Restore parent position using registry
+        if (imageState.parentElement) {
+            const registryEntry = this.parentRegistry.get(imageState.parentElement);
+            if (registryEntry) {
+                registryEntry.count--;
+                if (registryEntry.count <= 0) {
+                    imageState.parentElement.style.position = registryEntry.originalPosition;
+                    this.parentRegistry.delete(imageState.parentElement);
+                }
             }
         }
 
@@ -592,7 +729,7 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     createResetButton(target: HTMLImageElement | SVGSVGElement): HTMLButtonElement {
-        const button = document.createElement('button');
+        const button = target.ownerDocument.createElement('button');
         button.className = 'image-zoom-reset-btn';
         button.textContent = 'Reset';
         button.setAttribute('aria-label', 'Reset zoom and pan');
@@ -610,15 +747,15 @@ export default class ImageZoomDragPlugin extends Plugin {
 
         this.hideResetButton(target);
 
-        const controlsContainer = document.createElement("div");
+        const controlsContainer = target.ownerDocument.createElement("div");
         controlsContainer.className = "image-zoom-controls";
 
         const resetButton = this.createResetButton(target);
 
         controlsContainer.appendChild(resetButton);
 
-        if (target instanceof HTMLImageElement) {
-            const editButton = document.createElement("button");
+        if (target.tagName.toLowerCase() === 'img') {
+            const editButton = target.ownerDocument.createElement("button");
             editButton.className = "image-zoom-edit-btn";
             editButton.textContent = "✏️ Edit";
             editButton.title = "Open in external editor";
@@ -632,7 +769,15 @@ export default class ImageZoomDragPlugin extends Plugin {
 
         const parent = target.parentElement;
         if (parent) {
-            parent.style.position = "relative";
+            // Apply reference counting for position relative
+            let registryEntry = this.parentRegistry.get(parent);
+            if (!registryEntry) {
+                registryEntry = { count: 0, originalPosition: parent.style.position || "" };
+                this.parentRegistry.set(parent, registryEntry);
+                parent.style.position = "relative";
+            }
+            registryEntry.count++;
+
             parent.appendChild(controlsContainer);
 
             // Store button and container references in image state
@@ -652,13 +797,6 @@ export default class ImageZoomDragPlugin extends Plugin {
             imageState.controlsContainer.remove();
             imageState.controlsContainer = null;
             imageState.resetButton = null;
-        } else {
-            // Fallback for cleanup
-            const parent = target.parentElement;
-            if (parent) {
-                const existingControls = parent.querySelector(".image-zoom-controls");
-                if (existingControls) existingControls.remove();
-            }
         }
     }
 
@@ -687,34 +825,21 @@ class ImageZoomSettingTab extends PluginSettingTab {
         const {containerEl} = this;
         containerEl.empty();
 
-        containerEl.createEl('h2', {text: 'Image Zoom & Drag Settings'});
+        console.log("[Image Pan and Zoom] Settings tab rendered", {
+            exclusiveImageHandling: this.plugin.settings.disableNativeImageInteractions
+        });
 
-        // Use system default toggle
+        containerEl.createEl('h2', {text: 'Image Zoom & Drag Settings'});
 
         // Interaction Settings
         new Setting(containerEl)
-            .setName('Disable native image interactions')
-            .setDesc('Prevent normal image opening and dragging in supported note content. Alt-click to activate pan and zoom.')
+            .setName('Exclusive image handling')
+            .setDesc('Use this plugin instead of normal image opening and dragging in supported notes. Alt-click to activate pan and zoom. Right-click an image for plugin controls.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.disableNativeImageInteractions)
                 .onChange(async (value) => {
-                    this.plugin.settings.disableNativeImageInteractions = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.endCurrentDrag("settings-changed");
-                    this.display(); // Refresh to show/hide context menu setting
+                    await this.plugin.setExclusiveImageHandling(value, 'settings');
                 }));
-
-        if (this.plugin.settings.disableNativeImageInteractions) {
-            new Setting(containerEl)
-                .setName('Disable native image context menu')
-                .setDesc('Also suppress right-click menus on supported images. The plugin’s Edit button remains available.')
-                .addToggle(toggle => toggle
-                    .setValue(this.plugin.settings.disableNativeImageContextMenu)
-                    .onChange(async (value) => {
-                        this.plugin.settings.disableNativeImageContextMenu = value;
-                        await this.plugin.saveSettings();
-                    }));
-        }
 
         new Setting(containerEl)
             .setName('Debug image interactions')
@@ -726,6 +851,7 @@ class ImageZoomSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
+        // Use system default toggle
         new Setting(containerEl)
             .setName('Use system default editor')
             .setDesc('Open images with the default system application')
@@ -741,9 +867,9 @@ class ImageZoomSettingTab extends PluginSettingTab {
         if (!this.plugin.settings.useSystemDefault) {
             new Setting(containerEl)
                 .setName('External editor path')
-                .setDesc('Full path to your image editor (e.g., C:\\Windows\\System32\\mspaint.exe or /usr/bin/gimp)')
+                .setDesc('Full path to your image editor (e.g., C:\Windows\System32\mspaint.exe or /usr/bin/gimp)')
                 .addText(text => text
-                    .setPlaceholder('C:\\Program Files\\Adobe\\Photoshop\\photoshop.exe')
+                    .setPlaceholder('C:\Program Files\Adobe\Photoshop\photoshop.exe')
                     .setValue(this.plugin.settings.externalEditorPath)
                     .onChange(async (value) => {
                         this.plugin.settings.externalEditorPath = value;
@@ -759,8 +885,8 @@ class ImageZoomSettingTab extends PluginSettingTab {
                 cls: 'external-editor-examples'
             }).innerHTML = `
                 <li><strong>MS Paint (Windows):</strong> mspaint.exe</li>
-                <li><strong>Paint.NET (Windows):</strong> C:\\Program Files\\paint.net\\PaintDotNet.exe</li>
-                <li><strong>GIMP (Windows):</strong> C:\\Program Files\\GIMP 2\\bin\\gimp-2.10.exe</li>
+                <li><strong>Paint.NET (Windows):</strong> C:\Program Files\paint.net\PaintDotNet.exe</li>
+                <li><strong>GIMP (Windows):</strong> C:\Program Files\GIMP 2\bin\gimp-2.10.exe</li>
                 <li><strong>GIMP (Mac):</strong> /Applications/GIMP.app/Contents/MacOS/gimp</li>
                 <li><strong>Preview (Mac):</strong> open -a Preview</li>
             `;
