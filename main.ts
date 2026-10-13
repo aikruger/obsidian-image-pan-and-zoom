@@ -1,12 +1,13 @@
 import { Plugin, App, PluginSettingTab, Setting, Notice, TFile, FileSystemAdapter, Menu } from 'obsidian';
 
 import { ImageInteractionController } from './src/image-interaction-controller';
+import { buildArguments } from './src/external-editor';
 
 interface ImageZoomSettings {
     externalEditorPath: string;
+    externalEditorArguments: string;
     useSystemDefault: boolean;
     disableNativeImageInteractions: boolean;
-    disableNativeImageContextMenu: boolean;
     debugImageInteractions: boolean;
 }
 
@@ -43,9 +44,9 @@ interface ImageState {
 
 const DEFAULT_SETTINGS: ImageZoomSettings = {
     externalEditorPath: '',
+    externalEditorArguments: '"{file}"',
     useSystemDefault: true,
     disableNativeImageInteractions: false,
-    disableNativeImageContextMenu: false,
     debugImageInteractions: false,
 }
 
@@ -314,10 +315,19 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     async openImageInExternalApp(file: TFile) {
-        if (!file) {
+        if (!file || !(file instanceof TFile)) {
             new Notice("Could not locate image file in vault");
             return;
         }
+
+        // Require desktop filesystem support
+        if (!(this.app.vault.adapter instanceof FileSystemAdapter)) {
+            new Notice("External editors are only supported on desktop filesystems.");
+            return;
+        }
+
+        const path = require("path");
+        const fs = require("fs");
 
         // Get the clean file path (remove any query parameters)
         let filePath = file.path;
@@ -327,19 +337,16 @@ export default class ImageZoomDragPlugin extends Plugin {
             filePath = filePath.split('?')[0];
         }
 
-        // If using OneDrive or a sync folder, handle Win path decode
-        if (this.app.vault.adapter instanceof FileSystemAdapter) {
-            // Get full filesystem path (most reliable and works with OneDrive)
-            const basePath = this.app.vault.adapter.getBasePath();
-            filePath = require("path").join(basePath, filePath);
+        // Get full filesystem path
+        const basePath = this.app.vault.adapter.getBasePath();
+        filePath = path.join(basePath, filePath);
+        filePath = path.normalize(filePath);
+
+        // Confirm the image still exists
+        if (!fs.existsSync(filePath)) {
+            new Notice("Image file no longer exists on disk.");
+            return;
         }
-
-        // Normalize path to clean any duplicate slashes and ensure proper format
-        filePath = require("path").normalize(filePath);
-
-        // Log the file path for debugging
-        console.log("Opening image file:", filePath);
-        console.log("Original file.path:", file.path);
 
         if (this.settings.useSystemDefault) {
             require("electron").shell.openPath(filePath)
@@ -365,32 +372,64 @@ export default class ImageZoomDragPlugin extends Plugin {
                 return;
             }
             const { spawn } = require("child_process");
+            const path = require("path");
+
+            // Validate executable path
+            let executablePath = editorPath.trim();
+            // Remove single surrounding quotes if present
+            if (executablePath.startsWith('"') && executablePath.endsWith('"')) {
+                executablePath = executablePath.substring(1, executablePath.length - 1);
+            }
+
+            let args: string[];
             try {
-                // On Windows, use shell: true to properly handle paths with spaces and simple executable names
-                const isWindows = process.platform === 'win32';
-                
-                if (isWindows) {
-                    // On Windows with shell, construct command string with proper quoting
-                    const cmd = `"${editorPath}" "${filePath}"`;
-                    spawn(cmd, { 
-                        detached: true, 
-                        stdio: 'ignore',
-                        shell: true 
-                    }).unref();
-                } else {
-                    // On non-Windows platforms, pass arguments as array
-                    spawn(editorPath, [filePath], { 
-                        detached: true, 
-                        stdio: 'ignore'
-                    }).unref();
-                }
-                new Notice("Image opened in external editor");
-                console.log("Spawned external editor:", editorPath, "with file:", filePath);
-            } catch (h) {
-                new Notice("Failed to open external editor: " + h.message);
-                console.error("External editor error:", h);
-                console.error("Editor path:", editorPath);
-                console.error("File path:", filePath);
+                args = buildArguments(this.settings.externalEditorArguments || '"{file}"', filePath);
+            } catch (e: any) {
+                new Notice("Invalid argument template: " + e.message);
+                console.error("[Image Pan and Zoom] Argument parsing error:", e.message);
+                return;
+            }
+
+            if (this.settings.debugImageInteractions) {
+                console.log("[Image Pan and Zoom] External editor launch details", {
+                    executable: executablePath,
+                    arguments: args
+                });
+            }
+
+            console.log("[Image Pan and Zoom] External editor launch requested", {
+                editorName: path.basename(executablePath),
+                argumentCount: args.length,
+                usesFilePlaceholder: true,
+                shell: false
+            });
+
+            try {
+                const child = spawn(executablePath, args, {
+                    shell: false,
+                    detached: true,
+                    stdio: 'ignore',
+                    windowsHide: true
+                });
+
+                child.once('error', (error: NodeJS.ErrnoException) => {
+                    console.error("[Image Pan and Zoom] External editor launch failed", {
+                        code: error.code,
+                        message: error.message
+                    });
+                    new Notice("Could not launch the external image editor. Check its executable path and arguments.");
+                });
+
+                child.once('spawn', () => {
+                    console.log("[Image Pan and Zoom] External editor process started", {
+                        pid: child.pid
+                    });
+                    new Notice("External image editor launched");
+                    child.unref();
+                });
+            } catch (h: any) {
+                new Notice("Failed to launch external editor: " + h.message);
+                console.error("[Image Pan and Zoom] External editor error:", h);
             }
         }
     }
@@ -401,14 +440,77 @@ export default class ImageZoomDragPlugin extends Plugin {
             new Notice("Could not get image source");
             return null;
         }
-        src = decodeURIComponent(src.split("?")[0]);
-        let file = this.app.vault.getAbstractFileByPath(src);
-        if (!file) {
-            let filename = src.split("/").pop();
-            let allFiles = this.app.vault.getFiles();
-            file = allFiles.find(f => f.name === filename) || null;
+
+        // Reject remote URLs
+        if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('app://')) {
+            // It could be a local app:// URL on desktop.
+            // We'll proceed to check the actual decoded path in a moment,
+            // but let's strictly reject http/https right away.
+            if (src.startsWith('http://') || src.startsWith('https://')) {
+                new Notice("Remote images cannot be opened in a local editor.");
+                return null;
+            }
         }
-        return file as TFile;
+
+        // Try getting the source directly from the embed wrapper metadata if possible
+        const embedWrapper = imageElement.closest('.internal-embed.image-embed');
+        let linkText = '';
+        if (embedWrapper) {
+            linkText = embedWrapper.getAttribute('src') || '';
+        }
+
+        // Decode the raw DOM src
+        src = decodeURIComponent(src.split("?")[0]);
+
+        // Find the active file to resolve relative links against
+        const activeFile = this.app.workspace.getActiveFile();
+        let sourcePath = activeFile ? activeFile.path : '';
+
+        let targetFile: TFile | null = null;
+
+        // Use Obsidian's metadata cache to resolve the link if we got it from the embed
+        if (linkText) {
+            const resolved = this.app.metadataCache.getFirstLinkpathDest(linkText, sourcePath);
+            if (resolved instanceof TFile) {
+                targetFile = resolved;
+            }
+        }
+
+        if (!targetFile) {
+            // Attempt to resolve by exact vault path using the DOM src
+            const abstractFile = this.app.vault.getAbstractFileByPath(src);
+            if (abstractFile instanceof TFile) {
+                targetFile = abstractFile;
+            }
+        }
+
+        if (!targetFile) {
+            // Last resort: extract filename and use link resolution
+            const filename = src.split('/').pop() || src;
+            const resolved = this.app.metadataCache.getFirstLinkpathDest(filename, sourcePath);
+
+            if (resolved instanceof TFile) {
+                // If it successfully mapped to a single file through cache
+                targetFile = resolved;
+            } else {
+                // Check if multiple files have this name
+                const allFiles = this.app.vault.getFiles();
+                const matches = allFiles.filter(f => f.name === filename);
+                if (matches.length > 1) {
+                    new Notice("Multiple images with this name exist. Open the specific file directly.");
+                    return null;
+                } else if (matches.length === 1) {
+                    targetFile = matches[0];
+                }
+            }
+        }
+
+        if (targetFile && this.isImageFile(targetFile)) {
+            return targetFile;
+        }
+
+        new Notice("Could not resolve image to a valid vault file.");
+        return null;
     }
 
 
@@ -866,13 +968,24 @@ class ImageZoomSettingTab extends PluginSettingTab {
         // Custom editor path (only show if not using default)
         if (!this.plugin.settings.useSystemDefault) {
             new Setting(containerEl)
-                .setName('External editor path')
-                .setDesc('Full path to your image editor (e.g., C:\Windows\System32\mspaint.exe or /usr/bin/gimp)')
+                .setName('External editor executable')
+                .setDesc('Path to the application executable, without command-line arguments or surrounding quotes.')
                 .addText(text => text
-                    .setPlaceholder('C:\Program Files\Adobe\Photoshop\photoshop.exe')
+                    .setPlaceholder('C:\\Program Files\\ShareX\\ShareX.exe')
                     .setValue(this.plugin.settings.externalEditorPath)
                     .onChange(async (value) => {
                         this.plugin.settings.externalEditorPath = value;
+                        await this.plugin.saveSettings();
+                    }));
+
+            new Setting(containerEl)
+                .setName('External editor arguments')
+                .setDesc('Arguments passed to the editor. Use {file} for the selected image’s absolute path. Example: -ImageEditor "{file}"')
+                .addText(text => text
+                    .setPlaceholder('"{file}"')
+                    .setValue(this.plugin.settings.externalEditorArguments)
+                    .onChange(async (value) => {
+                        this.plugin.settings.externalEditorArguments = value;
                         await this.plugin.saveSettings();
                     }));
 
@@ -884,11 +997,9 @@ class ImageZoomSettingTab extends PluginSettingTab {
             containerEl.createEl('ul', {
                 cls: 'external-editor-examples'
             }).innerHTML = `
-                <li><strong>MS Paint (Windows):</strong> mspaint.exe</li>
-                <li><strong>Paint.NET (Windows):</strong> C:\Program Files\paint.net\PaintDotNet.exe</li>
-                <li><strong>GIMP (Windows):</strong> C:\Program Files\GIMP 2\bin\gimp-2.10.exe</li>
-                <li><strong>GIMP (Mac):</strong> /Applications/GIMP.app/Contents/MacOS/gimp</li>
-                <li><strong>Preview (Mac):</strong> open -a Preview</li>
+                <li><strong>ShareX (Windows):</strong> Executable: ShareX.exe, Arguments: -ImageEditor "{file}"</li>
+                <li><strong>MS Paint (Windows):</strong> Executable: mspaint.exe, Arguments: "{file}"</li>
+                <li><strong>GIMP (Mac):</strong> Executable: /Applications/GIMP.app/Contents/MacOS/gimp, Arguments: "{file}"</li>
             `;
         }
     }

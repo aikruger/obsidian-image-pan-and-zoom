@@ -93,10 +93,6 @@ export class ImageInteractionController {
         return this.plugin.settings.disableNativeImageInteractions;
     }
 
-    public isContextMenuSuppressed(): boolean {
-        return this.plugin.settings.disableNativeImageContextMenu;
-    }
-
     public isDebugEnabled(): boolean {
         return this.plugin.settings.debugImageInteractions;
     }
