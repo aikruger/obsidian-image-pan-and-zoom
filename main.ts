@@ -1,8 +1,13 @@
 import { Plugin, App, PluginSettingTab, Setting, Notice, TFile, FileSystemAdapter } from 'obsidian';
 
+import { ImageInteractionController } from './src/image-interaction-controller';
+
 interface ImageZoomSettings {
     externalEditorPath: string;
     useSystemDefault: boolean;
+    disableNativeImageInteractions: boolean;
+    disableNativeImageContextMenu: boolean;
+    debugImageInteractions: boolean;
 }
 
 interface ImageState {
@@ -13,15 +18,35 @@ interface ImageState {
     offsetY: number;
     scale: number;
     resetButton: HTMLButtonElement | null;
+    controlsContainer: HTMLDivElement | null;
     isSvg: boolean;
     originalViewBox: { x: number; y: number; width: number; height: number; } | null;
     svgViewBox: { x: number; y: number; width: number; height: number; } | null;
     resizeObserver: ResizeObserver | null;
+    // Original styles and attributes for restoration
+    originalStyles: {
+        transform: string | null;
+        transformOrigin: string | null;
+        transition: string | null;
+        cursor: string | null;
+        width: string | null;
+        height: string | null;
+        position: string | null; // for parent
+    };
+    originalAttributes: {
+        viewBox: string | null;
+        width: string | null;
+        height: string | null;
+        preserveAspectRatio: string | null;
+    };
 }
 
 const DEFAULT_SETTINGS: ImageZoomSettings = {
     externalEditorPath: '',
-    useSystemDefault: true
+    useSystemDefault: true,
+    disableNativeImageInteractions: false,
+    disableNativeImageContextMenu: false,
+    debugImageInteractions: false,
 }
 
 export default class ImageZoomDragPlugin extends Plugin {
@@ -31,6 +56,8 @@ export default class ImageZoomDragPlugin extends Plugin {
     private currentDragTarget: HTMLImageElement | SVGSVGElement | null = null; // Track which image is currently being dragged
     private globalResizeObservers = new Set<ResizeObserver>(); // Track all resize observers
     private resizeObserver: ResizeObserver | null = null;
+    private interactionController: ImageInteractionController;
+
 
 
     async onload() {
@@ -38,9 +65,30 @@ export default class ImageZoomDragPlugin extends Plugin {
 
         this.addSettingTab(new ImageZoomSettingTab(this.app, this));
 
-        this.registerDomEvent(document, 'click', this.handleImageClick.bind(this));
-        this.registerDomEvent(document, 'wheel', this.handleWheel.bind(this), { passive: false });
-        this.registerDomEvent(document, 'mousedown', this.handleMouseDown.bind(this));
+
+        this.interactionController = new ImageInteractionController(this, this.app);
+
+        // Register for main document
+        this.interactionController.registerDocument(document);
+
+        // Handle blur to end drags
+        this.registerDomEvent(window, 'blur', () => this.endCurrentDrag('window-blur'));
+
+        // Register for popout windows if supported
+        if ((this.app.workspace as any).on) {
+            this.registerEvent(
+                this.app.workspace.on('window-open', (win, window) => {
+                    this.interactionController.registerDocument(window.document);
+                })
+            );
+            this.registerEvent(
+                this.app.workspace.on('window-close', (win, window) => {
+                    this.interactionController.unregisterDocument(window.document);
+                    this.cleanupDetachedImages();
+                })
+            );
+        }
+
         this.registerDomEvent(document, 'mousemove', this.handleMouseMove.bind(this));
         this.registerDomEvent(document, 'mouseup', this.handleMouseUp.bind(this));
 
@@ -92,15 +140,45 @@ export default class ImageZoomDragPlugin extends Plugin {
     }
 
     onunload() {
+        this.endCurrentDrag("plugin-unload");
+
         // Clean up all resize observers
         this.globalResizeObservers.forEach(observer => observer.disconnect());
         this.globalResizeObservers.clear();
+
+        if (this.interactionController) {
+            this.interactionController.dispose();
+        }
+
 
         // Reset all zoomed images
         this.zoomedImages.forEach((imageState, target) => {
             this.resetImage(target);
         });
         this.zoomedImages.clear();
+    }
+
+
+    cleanupDetachedImages() {
+        this.zoomedImages.forEach((imageState, target) => {
+            if (!document.contains(target)) {
+                let isInAnyDoc = false;
+                // Check if it's in any popout window
+                if (this.interactionController) {
+                    const docs = this.interactionController.getRegisteredDocuments();
+                    for (const doc of docs) {
+                        if (doc.contains(target)) {
+                            isInAnyDoc = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!isInAnyDoc) {
+                    this.resetImage(target);
+                }
+            }
+        });
     }
 
     async loadSettings() {
@@ -209,64 +287,117 @@ export default class ImageZoomDragPlugin extends Plugin {
         return file as TFile;
     }
 
-    handleImageClick(e: MouseEvent) {
-        if (!e.altKey) return;
-        if ((e.target as HTMLElement).closest(".modal, .suggestion-container, .mod-left-split, .mod-right-split")) return;
 
-        const target = (e.target as HTMLElement).closest("img, svg");
-        if (target instanceof HTMLImageElement || target instanceof SVGSVGElement) {
-            let workspaceSplit = target.closest(".workspace-split");
-            if (!workspaceSplit ||
-                workspaceSplit.classList.contains("mod-left-split") ||
-                workspaceSplit.classList.contains("mod-right-split") ||
-                !target.closest(".workspace-leaf-content")) return;
-
-            // Check if this image is already zoomed
-            if (this.zoomedImages.has(target)) {
-                // Image is already zoomed, do nothing (keep zoom persistent)
-                return;
-            }
-
-            // Create new zoom state for this image
-            const imageState: ImageState = {
-                isDragging: false,
-                initialX: 0,
-                initialY: 0,
-                offsetX: 0,
-                offsetY: 0,
-                scale: 1,
-                resetButton: null,
-                isSvg: target instanceof SVGSVGElement,
-                originalViewBox: null,
-                svgViewBox: null,
-                resizeObserver: null
-            };
-
-            // Handle SVG-specific setup
-            if (imageState.isSvg) {
-                const svg = target as SVGSVGElement;
-                const viewBox = svg.getAttribute("viewBox");
-                if (viewBox) {
-                    const parsedViewBox = this.parseViewBox(viewBox);
-                    if (parsedViewBox) {
-                        imageState.originalViewBox = parsedViewBox;
-                        imageState.svgViewBox = { ...parsedViewBox };
-                    }
-                }
-                const resizeObserver = this.setupDynamicResize(svg);
-                if (resizeObserver) {
-                    imageState.resizeObserver = resizeObserver;
-                    this.globalResizeObservers.add(imageState.resizeObserver);
-                }
-            }
-
-            // Store state and activate zoom
-            this.zoomedImages.set(target, imageState);
-            target.classList.add("image-zoom-drag-active");
-            target.style.cursor = "grab";
-            this.showResetButton(target);
-        }
+    isImageActive(target: HTMLImageElement | SVGSVGElement): boolean {
+        return this.zoomedImages.has(target);
     }
+
+    activateImage(target: HTMLImageElement | SVGSVGElement) {
+        // Create new zoom state for this image
+        const imageState: ImageState = {
+            isDragging: false,
+            initialX: 0,
+            initialY: 0,
+            offsetX: 0,
+            offsetY: 0,
+            scale: 1,
+            resetButton: null,
+            controlsContainer: null,
+            isSvg: target instanceof SVGSVGElement,
+            originalViewBox: null,
+            svgViewBox: null,
+            resizeObserver: null,
+            originalStyles: {
+                transform: target.style.transform || null,
+                transformOrigin: target.style.transformOrigin || null,
+                transition: target.style.transition || null,
+                cursor: target.style.cursor || null,
+                width: target.style.width || null,
+                height: target.style.height || null,
+                position: target.parentElement ? target.parentElement.style.position || null : null
+            },
+            originalAttributes: {
+                viewBox: target.getAttribute("viewBox"),
+                width: target.getAttribute("width"),
+                height: target.getAttribute("height"),
+                preserveAspectRatio: target.getAttribute("preserveAspectRatio")
+            }
+        };
+
+        // Handle SVG-specific setup
+        if (imageState.isSvg) {
+            const svg = target as SVGSVGElement;
+            const viewBox = svg.getAttribute("viewBox");
+            if (viewBox) {
+                const parsedViewBox = this.parseViewBox(viewBox);
+                if (parsedViewBox) {
+                    imageState.originalViewBox = parsedViewBox;
+                    imageState.svgViewBox = { ...parsedViewBox };
+                }
+            }
+            const resizeObserver = this.setupDynamicResize(svg);
+            if (resizeObserver) {
+                imageState.resizeObserver = resizeObserver;
+                this.globalResizeObservers.add(imageState.resizeObserver);
+            }
+        }
+
+        // Store state and activate zoom
+        this.zoomedImages.set(target, imageState);
+        target.classList.add("image-zoom-drag-active");
+        target.style.cursor = "grab";
+        this.showResetButton(target);
+    }
+
+    handleWheelInternal(e: WheelEvent, target: HTMLImageElement | SVGSVGElement) {
+        const imageState = this.zoomedImages.get(target);
+        if (!imageState || !this.isMouseWithinFrame(e, target)) return;
+
+        const zoomFactor = 1.1;
+        const previousScale = imageState.scale;
+
+        if (e.deltaY < 0) {
+            imageState.scale *= zoomFactor;
+        } else {
+            imageState.scale /= zoomFactor;
+        }
+
+        imageState.scale = Math.max(0.1, imageState.scale);
+
+        const rect = target.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        const scaleRatio = imageState.scale / previousScale;
+
+        imageState.offsetX = mouseX - (mouseX - imageState.offsetX) * scaleRatio;
+        imageState.offsetY = mouseY - (mouseY - imageState.offsetY) * scaleRatio;
+
+        if (imageState.isSvg && imageState.svgViewBox && imageState.originalViewBox) {
+            const viewBoxWidth = imageState.originalViewBox.width / imageState.scale;
+            const viewBoxHeight = imageState.originalViewBox.height / imageState.scale;
+
+            imageState.svgViewBox.x = imageState.originalViewBox.x - imageState.offsetX * (viewBoxWidth / imageState.originalViewBox.width);
+            imageState.svgViewBox.y = imageState.originalViewBox.y - imageState.offsetY * (viewBoxHeight / imageState.originalViewBox.height);
+            imageState.svgViewBox.width = viewBoxWidth;
+            imageState.svgViewBox.height = viewBoxHeight;
+        }
+
+        this.updateTransform(target, imageState);
+        if (imageState.isSvg) this.fitSvgToContainer(target as SVGSVGElement);
+    }
+
+    startPan(e: MouseEvent, target: HTMLImageElement | SVGSVGElement) {
+        const imageState = this.zoomedImages.get(target);
+        if (!imageState || !this.isMouseWithinFrame(e, target)) return;
+
+        this.currentDragTarget = target;
+        imageState.isDragging = true;
+        imageState.initialX = e.clientX - imageState.offsetX;
+        imageState.initialY = e.clientY - imageState.offsetY;
+        target.classList.add("is-dragging");
+    }
+
+
 
     parseViewBox(viewBoxString: string): { x: number; y: number; width: number; height: number; } | null {
         const parts = viewBoxString.split(' ').map(parseFloat);
@@ -302,65 +433,9 @@ export default class ImageZoomDragPlugin extends Plugin {
         return null;
     }
 
-    handleWheel(e: WheelEvent) {
-        const target = (e.target as HTMLElement).closest("img, svg");
-        if (!(target instanceof HTMLImageElement || target instanceof SVGSVGElement) || !this.zoomedImages.has(target)) return;
 
-        const imageState = this.zoomedImages.get(target);
-        if (!imageState || !this.isMouseWithinFrame(e, target) || !e.altKey) return;
 
-        e.preventDefault();
-        e.stopPropagation();
 
-        const zoomFactor = 1.1;
-        const previousScale = imageState.scale;
-
-        if (e.deltaY < 0) {
-            imageState.scale *= zoomFactor;
-        } else {
-            imageState.scale /= zoomFactor;
-        }
-
-        imageState.scale = Math.max(0.1, imageState.scale);
-
-        const rect = target.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-        const scaleRatio = imageState.scale / previousScale;
-
-        imageState.offsetX = mouseX - (mouseX - imageState.offsetX) * scaleRatio;
-        imageState.offsetY = mouseY - (mouseY - imageState.offsetY) * scaleRatio;
-
-        if (imageState.isSvg && imageState.svgViewBox && imageState.originalViewBox) {
-            const viewBoxWidth = imageState.originalViewBox.width / imageState.scale;
-            const viewBoxHeight = imageState.originalViewBox.height / imageState.scale;
-
-            imageState.svgViewBox.x = imageState.originalViewBox.x - imageState.offsetX * (viewBoxWidth / imageState.originalViewBox.width);
-            imageState.svgViewBox.y = imageState.originalViewBox.y - imageState.offsetY * (viewBoxHeight / imageState.originalViewBox.height);
-            imageState.svgViewBox.width = viewBoxWidth;
-            imageState.svgViewBox.height = viewBoxHeight;
-        }
-
-        this.updateTransform(target, imageState);
-        if (imageState.isSvg) this.fitSvgToContainer(target as SVGSVGElement);
-    }
-
-    handleMouseDown(e: MouseEvent) {
-        const target = (e.target as HTMLElement).closest("img, svg");
-        if (e.button !== 0 || !(target instanceof HTMLImageElement || target instanceof SVGSVGElement) || !this.zoomedImages.has(target)) return;
-
-        const imageState = this.zoomedImages.get(target);
-        if (!imageState || !this.isMouseWithinFrame(e, target) || !target.contains(e.target as Node)) return;
-
-        if ((e.target as HTMLElement).closest(".image-zoom-reset-btn")) return;
-
-        this.currentDragTarget = target;
-        imageState.isDragging = true;
-        imageState.initialX = e.clientX - imageState.offsetX;
-        imageState.initialY = e.clientY - imageState.offsetY;
-        target.classList.add("is-dragging");
-        e.preventDefault();
-    }
 
     handleMouseMove(e: MouseEvent) {
         if (!this.currentDragTarget) return;
@@ -372,9 +447,7 @@ export default class ImageZoomDragPlugin extends Plugin {
         const buffer = 100;
         if (e.clientX < rect.left - buffer || e.clientX > rect.right + buffer ||
             e.clientY < rect.top - buffer || e.clientY > rect.bottom + buffer) {
-            imageState.isDragging = false;
-            this.currentDragTarget.classList.remove("is-dragging");
-            this.currentDragTarget = null;
+            this.endCurrentDrag("out-of-bounds");
             return;
         }
 
@@ -390,15 +463,25 @@ export default class ImageZoomDragPlugin extends Plugin {
         if (imageState.isSvg) this.fitSvgToContainer(this.currentDragTarget as SVGSVGElement);
     }
 
-    handleMouseUp(e: MouseEvent) {
-        if (this.currentDragTarget) {
-            const imageState = this.zoomedImages.get(this.currentDragTarget);
-            if (imageState && imageState.isDragging) {
-                imageState.isDragging = false;
-                this.currentDragTarget.classList.remove("is-dragging");
-            }
-            this.currentDragTarget = null;
+
+    endCurrentDrag(reason: string): void {
+        if (!this.currentDragTarget) return;
+
+        const imageState = this.zoomedImages.get(this.currentDragTarget);
+        if (imageState) {
+            imageState.isDragging = false;
         }
+
+        this.currentDragTarget.classList.remove("is-dragging");
+        this.currentDragTarget = null;
+
+        if (this.settings.debugImageInteractions) {
+            console.log("[Image Pan and Zoom] Drag ended", { reason });
+        }
+    }
+
+    handleMouseUp(e: MouseEvent) {
+        this.endCurrentDrag("mouse-up");
     }
 
     updateTransform(target: HTMLImageElement | SVGSVGElement, imageState: any) {
@@ -422,22 +505,86 @@ export default class ImageZoomDragPlugin extends Plugin {
         const imageState = this.zoomedImages.get(target);
         if (!imageState) return;
 
+        if (this.currentDragTarget === target) {
+            this.endCurrentDrag("image-reset");
+        }
+
         if (imageState.resizeObserver) {
             imageState.resizeObserver.disconnect();
             this.globalResizeObservers.delete(imageState.resizeObserver);
         }
 
-        if (imageState.isSvg && imageState.originalViewBox) {
-            (target as SVGSVGElement).setAttribute("viewBox", `${imageState.originalViewBox.x} ${imageState.originalViewBox.y} ${imageState.originalViewBox.width} ${imageState.originalViewBox.height}`);
+        // Restore attributes
+        if (imageState.originalAttributes.viewBox !== null) {
+            target.setAttribute("viewBox", imageState.originalAttributes.viewBox);
+        } else {
+            target.removeAttribute("viewBox");
+        }
+
+        if (imageState.originalAttributes.width !== null) {
+            target.setAttribute("width", imageState.originalAttributes.width);
+        } else {
             target.removeAttribute("width");
+        }
+
+        if (imageState.originalAttributes.height !== null) {
+            target.setAttribute("height", imageState.originalAttributes.height);
+        } else {
             target.removeAttribute("height");
+        }
+
+        if (imageState.originalAttributes.preserveAspectRatio !== null) {
+            target.setAttribute("preserveAspectRatio", imageState.originalAttributes.preserveAspectRatio);
+        } else {
+            target.removeAttribute("preserveAspectRatio");
+        }
+
+        // Restore styles
+        if (imageState.originalStyles.transform !== null) {
+            target.style.transform = imageState.originalStyles.transform;
+        } else {
+            target.style.transform = "";
+        }
+
+        if (imageState.originalStyles.transformOrigin !== null) {
+            target.style.transformOrigin = imageState.originalStyles.transformOrigin;
+        } else {
+            target.style.transformOrigin = "";
+        }
+
+        if (imageState.originalStyles.transition !== null) {
+            target.style.transition = imageState.originalStyles.transition;
+        } else {
+            target.style.transition = "";
+        }
+
+        if (imageState.originalStyles.cursor !== null) {
+            target.style.cursor = imageState.originalStyles.cursor;
+        } else {
+            target.style.cursor = "";
+        }
+
+        if (imageState.originalStyles.width !== null) {
+            target.style.width = imageState.originalStyles.width;
+        } else {
             target.style.width = "";
+        }
+
+        if (imageState.originalStyles.height !== null) {
+            target.style.height = imageState.originalStyles.height;
+        } else {
             target.style.height = "";
         }
 
-        target.style.transform = "";
-        target.style.cursor = "default";
-        target.style.transition = "";
+        // Restore parent position
+        if (target.parentElement) {
+            if (imageState.originalStyles.position !== null) {
+                target.parentElement.style.position = imageState.originalStyles.position;
+            } else {
+                target.parentElement.style.position = "";
+            }
+        }
+
         target.classList.remove("image-zoom-drag-active");
 
         this.hideResetButton(target);
@@ -488,23 +635,31 @@ export default class ImageZoomDragPlugin extends Plugin {
             parent.style.position = "relative";
             parent.appendChild(controlsContainer);
 
-            // Store button reference in image state
+            // Store button and container references in image state
             const imageState = this.zoomedImages.get(target);
-            if (imageState) imageState.resetButton = resetButton;
+            if (imageState) {
+                imageState.resetButton = resetButton;
+                imageState.controlsContainer = controlsContainer;
+            }
         }
     }
 
     hideResetButton(target: HTMLImageElement | SVGSVGElement) {
         if (!target) return;
 
-        const parent = target.parentElement;
-        if (parent) {
-            const existingControls = parent.querySelector(".image-zoom-controls");
-            if (existingControls) existingControls.remove();
-        }
-
         const imageState = this.zoomedImages.get(target);
-        if (imageState) imageState.resetButton = null;
+        if (imageState && imageState.controlsContainer) {
+            imageState.controlsContainer.remove();
+            imageState.controlsContainer = null;
+            imageState.resetButton = null;
+        } else {
+            // Fallback for cleanup
+            const parent = target.parentElement;
+            if (parent) {
+                const existingControls = parent.querySelector(".image-zoom-controls");
+                if (existingControls) existingControls.remove();
+            }
+        }
     }
 
     isMouseWithinFrame(e: MouseEvent, target: HTMLImageElement | SVGSVGElement): boolean {
@@ -535,6 +690,42 @@ class ImageZoomSettingTab extends PluginSettingTab {
         containerEl.createEl('h2', {text: 'Image Zoom & Drag Settings'});
 
         // Use system default toggle
+
+        // Interaction Settings
+        new Setting(containerEl)
+            .setName('Disable native image interactions')
+            .setDesc('Prevent normal image opening and dragging in supported note content. Alt-click to activate pan and zoom.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.disableNativeImageInteractions)
+                .onChange(async (value) => {
+                    this.plugin.settings.disableNativeImageInteractions = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.endCurrentDrag("settings-changed");
+                    this.display(); // Refresh to show/hide context menu setting
+                }));
+
+        if (this.plugin.settings.disableNativeImageInteractions) {
+            new Setting(containerEl)
+                .setName('Disable native image context menu')
+                .setDesc('Also suppress right-click menus on supported images. The plugin’s Edit button remains available.')
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.disableNativeImageContextMenu)
+                    .onChange(async (value) => {
+                        this.plugin.settings.disableNativeImageContextMenu = value;
+                        await this.plugin.saveSettings();
+                    }));
+        }
+
+        new Setting(containerEl)
+            .setName('Debug image interactions')
+            .setDesc('Log interaction ownership and cleanup information to the developer console.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.debugImageInteractions)
+                .onChange(async (value) => {
+                    this.plugin.settings.debugImageInteractions = value;
+                    await this.plugin.saveSettings();
+                }));
+
         new Setting(containerEl)
             .setName('Use system default editor')
             .setDesc('Open images with the default system application')
