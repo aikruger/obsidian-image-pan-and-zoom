@@ -11,7 +11,19 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = (process.argv[2] === "production");
 
+
+import { execSync } from "child_process";
+let revision = "unknown";
+try {
+    revision = execSync("git rev-parse HEAD").toString().trim();
+} catch (e) {
+}
+
 const context = await esbuild.context({
+	define: {
+		BUILD_REVISION: JSON.stringify(revision),
+	},
+
 	banner: {
 		js: banner,
 	},

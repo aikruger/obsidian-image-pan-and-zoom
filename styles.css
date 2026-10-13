@@ -63,7 +63,7 @@
 }
 
 /* Mermaid SVG specific styles */
-.markdown-preview-view .mermaid svg {
+.markdown-preview-view .mermaid svg.image-zoom-drag-active {
   width: 100% !important;
   height: 100% !important;
   max-width: none !important;
